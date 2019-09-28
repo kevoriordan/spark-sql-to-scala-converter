@@ -1,2 +1,2 @@
 # spark-sql-to-scala-converter
-Convert Spark SQL code to Spark Scala
+Convert SQL code to Spark code (using Scala dialect)

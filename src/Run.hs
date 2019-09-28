@@ -1,11 +1,14 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 
 module Run (run, parseSql) where
 
 import Import
 
 import System.IO
+
+import Text.RawString.QQ
 
 import Text.Show.Pretty (ppShow)
 
@@ -17,12 +20,15 @@ import Language.SQL.SimpleSQL.Parse
        ,peFormattedError)
 
 import Language.SQL.SimpleSQL.Syntax (Statement, Statement (..), QueryExpr (..), SetQuantifier,
-    ScalarExpr, TableRef, GroupingExpr, SortSpec, Name, TableRef (..), Name(..), ScalarExpr(..))
+    ScalarExpr, TableRef, GroupingExpr, SortSpec, Name, TableRef (..), Name(..), ScalarExpr(..),
+    TypeName, TypeName (..))
 import Language.SQL.SimpleSQL.Dialect (postgres)
 
 
-run :: RIO App ()
-run = liftIO $ putStrLn $ T.unpack $ parseSql "select * from test"
+run :: RIO MyApp ()
+run = liftIO $ putStrLn $ T.unpack $ parseSql [r|
+SELECT blah FROM blah2
+|]
 
 parseSql :: String -> Text
 parseSql src = do
@@ -50,15 +56,95 @@ printSelectStatement :: SetQuantifier -> [(ScalarExpr,Maybe Name)] -> [TableRef]
 printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst  =
     let fromClause = case from of
                     [] -> "empty FROM not supported"
-                    [TRSimple [Name _ tableName]] -> T.pack tableName
-                    _ -> "not supported" in
-    let selectClause = ".select(" <> (T.intercalate ", " (map parseSelectList selectList)) <> ")" in
-    fromClause <> selectClause
+                    [TRSimple name] -> parseNames name
+                    blah -> T.pack (ppShow blah)  in
+    let whereClause = case sWhere of 
+                        Nothing -> ""
+                        Just expr -> "\n  .filter(" <> parseScalarExpression expr <> ")" in
+    let selectClause = "\n  .select(" <> (T.intercalate ", " (map parseSelectList selectList)) <> ")" in
+    fromClause <> whereClause <> selectClause
 
 parseSelectList :: (ScalarExpr,Maybe Name) -> Text
 parseSelectList col = case col of
-    (_, Just (Name Nothing name)) -> "col(\"" <> T.pack name <> "\""
-    (_, Just (Name (Just (name1, name2)) name3)) -> T.pack name1 <> "." <> T.pack name2 <> "." <> T.pack name3
-    (Star, Nothing) -> "col(\"*\")"
-    (Iden [Name Nothing name], Nothing) -> "col(\"" <> T.pack name <> "\")"
-    (expr, Nothing) -> T.pack $ ppShow expr
+    (expr, Just name) -> parseScalarExpression expr <> ".as(\"" <> parseNames [name] <> "\")"
+    (expr, Nothing) -> parseScalarExpression expr
+
+
+parseScalarExpressions :: [ScalarExpr] -> Text
+parseScalarExpressions exprs = T.intercalate ", " (map parseScalarExpression exprs)
+
+parseScalarExpression :: ScalarExpr -> Text
+parseScalarExpression expr = case expr of
+    Star -> "col(\"*\")"
+    Iden name -> "col(\"" <> parseNames name <> "\")"
+    App functionNames subExprs ->  parseFunctionNames functionNames <> "(" <> parseScalarExpressions subExprs <> ")"
+    Cast subExpr typeName -> parseScalarExpression subExpr <> ".cast(" <> sparkType typeName <> ")"
+    Case test whens elsePart -> parseCaseExpression test whens elsePart 
+    BinOp subExpr1 funcNames subExpr2 -> parseScalarExpression subExpr1 <> " " <> parseFunctionNames funcNames <> " " <> parseScalarExpression subExpr2
+    PostfixOp functionNames subExpr -> parseScalarExpression subExpr <> parseFunctionNames functionNames
+    SpecialOp functionNames subExprs -> handleSpecialOp functionNames subExprs
+    NumLit lit -> T.pack lit
+    StringLit _ _ lit -> "\"" <> T.pack lit <> "\""
+    unparsed -> T.pack $ ppShow unparsed 
+
+
+-- Currently used to handle between
+handleSpecialOp :: [Name] -> [ScalarExpr] -> Text
+handleSpecialOp functionNames exprs = case functionNames of
+    [Name Nothing "between"] -> handleBetween exprs
+    _ -> "ERROR"
+
+
+handleBetween :: [ScalarExpr] -> Text
+handleBetween exprs = case exprs of 
+    [expr1, expr2, expr3] ->  parseScalarExpression expr1
+                                    <> ".between(" <> parseScalarExpression expr2 <> ", " 
+                                    <> parseScalarExpression expr3 <> ")"
+    _ -> "unhandled"
+   
+
+parseFunctionNames :: [Name] -> Text
+parseFunctionNames names = case names of
+    [name] -> parseFunctionName name
+    [schemaName, name] -> parseName schemaName <> "." <> parseFunctionName name
+    other -> T.pack $ ppShow other
+
+parseFunctionName :: Name -> Text
+parseFunctionName name = case name of
+    Name Nothing subName -> sparkFunction $ T.pack subName
+    other -> T.pack $ ppShow other
+
+parseNames :: [Name] -> Text
+parseNames names = case names of
+    [name] -> parseName name
+    [schemaName, name] -> parseName schemaName <> "." <> parseName name
+    other -> T.pack $ ppShow other
+
+parseName :: Name -> Text
+parseName name = case name of
+    Name Nothing subName -> T.pack subName
+    other -> T.pack $ ppShow other
+
+parseCaseExpression :: Maybe ScalarExpr -> [([ScalarExpr],ScalarExpr)] -> Maybe ScalarExpr -> Text
+parseCaseExpression _ whens elsePart =
+    T.intercalate "." (map parseWhen whens) <> parseElse
+    where
+        parseWhen (condExprs, thenExpr) = "when(" <> parseScalarExpressions condExprs <> ", " <> parseScalarExpression thenExpr <> ")"
+        parseElse = case elsePart of
+            Nothing -> ""
+            Just expr -> ".otherwise(" <> parseScalarExpression expr <> ")"
+
+
+sparkFunction :: Text -> Text
+sparkFunction function = case T.toLower function of
+    "nvl" -> "coalesce"
+    "strpos" -> "instr"
+    "is null" -> ".isNull()"
+    "=" -> "==="
+    other -> T.toLower other
+
+sparkType :: TypeName -> Text
+sparkType typeName = case typeName of
+    TypeName name -> T.pack $ ppShow name
+    PrecTypeName [Name Nothing "varchar"] _ -> "DataTypes.StringType"
+    blah -> T.pack $ ppShow blah

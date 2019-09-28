@@ -24,6 +24,7 @@ dependencies:
 - rio >= 0.1.8.0
 - simple-sql-parser
 - pretty-show
+- raw-strings-qq
 
 ghc-options:
 - -Wall
