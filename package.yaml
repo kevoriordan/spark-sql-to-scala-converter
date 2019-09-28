@@ -1,0 +1,64 @@
+name:                spark-sql-to-scala-converter
+version:             0.1.0.0
+github:              githubuser/spark-sql-to-scala-converter
+license:             BSD3
+author:              Author name here
+maintainer:          example@example.com
+copyright:           2019 Author name here
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on Github at <https://github.com/githubuser/spark-sql-to-scala-converter#readme>
+
+dependencies:
+- base >= 4.11 && < 10
+- rio >= 0.1.8.0
+- simple-sql-parser
+- pretty-show
+
+ghc-options:
+- -Wall
+- -Wcompat
+- -Widentities
+- -Wincomplete-record-updates
+- -Wincomplete-uni-patterns
+- -Wpartial-fields
+- -Wredundant-constraints
+
+library:
+  source-dirs: src
+
+executables:
+  spark-sql-to-scala-converter-exe:
+    main:                Main.hs
+    source-dirs:         app
+    dependencies:
+    - spark-sql-to-scala-converter
+    - optparse-simple
+
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+
+tests:
+  spark-sql-to-scala-converter-test:
+    main:                Spec.hs
+    source-dirs:         test
+    dependencies:
+    - spark-sql-to-scala-converter
+    - hspec
+
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
