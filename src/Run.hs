@@ -1,6 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Run (run, parseSql) where
 
@@ -35,14 +36,14 @@ parseSql src = do
     let parsed :: Either ParseError [Statement]
         parsed = parseStatements postgres "" Nothing src
     either (error . peFormattedError)
-           printParsed
+           parseStmts
            parsed
 
-printParsed :: [Statement] -> Text
-printParsed statements = T.intercalate "\n" $ map printStatement statements
+parseStmts :: [Statement] -> Text
+parseStmts statements = T.intercalate "\n" $ map parseStatement statements
 
-printStatement :: Statement -> Text
-printStatement statement = case statement of
+parseStatement :: Statement -> Text
+parseStatement statement = case statement of
     SelectStatement queryExpression -> printQueryExpression queryExpression
     _ -> "not supported"
 
@@ -56,13 +57,19 @@ printSelectStatement :: SetQuantifier -> [(ScalarExpr,Maybe Name)] -> [TableRef]
 printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst  =
     let fromClause = case from of
                     [] -> "empty FROM not supported"
-                    [TRSimple name] -> parseNames name
+                    [TRSimple name] -> createForBlock $ parseNames name
                     blah -> T.pack (ppShow blah)  in
     let whereClause = case sWhere of 
                         Nothing -> ""
                         Just expr -> "\n  .filter(" <> parseScalarExpression expr <> ")" in
     let selectClause = "\n  .select(" <> (T.intercalate ", " (map parseSelectList selectList)) <> ")" in
     fromClause <> whereClause <> selectClause
+
+createForBlock :: Text -> Text
+createForBlock tableName = 
+    "val " <> cleanedTableName <> " = spark.table(\"" <> tableName <> "\")\n" <> cleanedTableName
+    where 
+        cleanedTableName = T.map (\case '.' -> '_'; other -> other) tableName
 
 parseSelectList :: (ScalarExpr,Maybe Name) -> Text
 parseSelectList col = case col of

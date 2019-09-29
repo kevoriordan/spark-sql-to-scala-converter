@@ -11,5 +11,5 @@ import Test.Hspec.QuickCheck
 spec :: Spec
 spec = do
   describe "sql checks" $ do
-    it "basic check" $ doIt "select * from test" `shouldBe` "test.select(col(\"*\"))"
-    it "with projected cols" $ doIt "select a, b from test" `shouldBe` "test.select(col(\"a\"), col(\"b\"))"
+    it "basic check" $ parseSql "select * from test" `shouldBe` "val test = spark.table(\"test\")\ntest\n  .select(col(\"*\"))"
+    it "with projected cols" $ parseSql "select a, b from test" `shouldBe` "val test = spark.table(\"test\")\ntest\n  .select(col(\"a\"), col(\"b\"))"
