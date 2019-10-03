@@ -25,13 +25,13 @@ import Language.SQL.SimpleSQL.Parse
 import Language.SQL.SimpleSQL.Syntax (Statement, Statement (..), QueryExpr (..), SetQuantifier,
     ScalarExpr, TableRef, GroupingExpr, SortSpec, Name, TableRef (..), Name(..), ScalarExpr(..),
     TypeName, TypeName (..), InsertSource, InsertSource(..), SetQuantifier(..), Alias, Alias(..),
-    InPredValue, InPredValue(..))
+    InPredValue, InPredValue(..), GroupingExpr(..))
 import Language.SQL.SimpleSQL.Dialect (postgres)
 
 
 run :: RIO MyApp ()
 run = liftIO $ putStrLn $ T.unpack $ parseSql [r|
-select a, b from test
+select a, b, count(c) from test group by a, b
 |]
 
 
@@ -101,12 +101,34 @@ printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy
     let whereClause = case sWhere of 
                         Nothing -> ""
                         Just expr -> "\n  .filter(" <> parseScalarExpressionToAny expr <> ")" in
-    let selectClause = "\n  .select(" <> (T.intercalate ", " (map parseSelectList selectList)) <> ")" in
-        let sqClause = case setQuantifier of
+    let groupByClause = parseGroupingExpressions groupBy in
+    let selectClause = parseSelectClause groupByClause selectList in
+    let sqClause = case setQuantifier of
                             SQDefault -> ""
                             All -> ""
                             Distinct -> "\n  .distinct()" in
-    fromClause <> whereClause <> selectClause <> sqClause
+    fromClause <> whereClause <> groupByClause <> selectClause <> sqClause
+
+parseSelectClause :: Text -> [(ScalarExpr,Maybe Name)] -> Text
+parseSelectClause groupByClause selectList = case groupByClause of
+    "" -> "\n  .select(" <> T.intercalate ", " (map parseSelectList selectList) <> ")"
+    _ -> "\n  .agg(" <> T.intercalate "," (map parseSelectList (filter isAgg selectList)) <> ")"
+
+isAgg :: (ScalarExpr, Maybe Name) -> Bool
+isAgg (expr, _) = case expr of
+    App _ _ -> True
+    _ -> False
+
+
+parseGroupingExpressions :: [GroupingExpr] -> Text
+parseGroupingExpressions groupingExpressions = case groupingExpressions of 
+    [] -> ""
+    other-> ".groupBy(" <> T.intercalate  "," (map parseGroupingExpression other) <> ")"
+
+parseGroupingExpression :: GroupingExpr -> Text
+parseGroupingExpression groupingExpr = case groupingExpr of
+    SimpleGroup scalarExpr -> parseScalarExpressionToCol scalarExpr
+    other -> T.pack $ ppShow other
 
 parseSelectList :: (ScalarExpr,Maybe Name) -> Text
 parseSelectList col = case col of
@@ -127,7 +149,7 @@ parseScalarExpressionToCol expr = case expr of
     NumLit lit -> "lit(" <> T.pack lit <> ")"
     StringLit _ _ lit -> "lit(\"" <> T.pack lit <> "\")"
     Iden name -> parseIdenToCol name
-    other -> parseScalarExpression other
+    other -> _parseScalarExpression other
 
 
 parseScalarExpressionToAny :: ScalarExpr -> Text
@@ -135,11 +157,11 @@ parseScalarExpressionToAny expr = case expr of
     NumLit lit -> T.pack lit
     StringLit _ _ lit -> "\"" <> T.pack lit <> "\""
     Iden name -> parseIdenToAny name
-    other -> parseScalarExpression other
+    other -> _parseScalarExpression other
 
 
-parseScalarExpression :: ScalarExpr -> Text
-parseScalarExpression expr = case expr of
+_parseScalarExpression :: ScalarExpr -> Text
+_parseScalarExpression expr = case expr of
     Star -> "col(\"*\")"
     App functionNames subExprs ->  parseAppExpression functionNames subExprs
     Cast subExpr typeName -> parseScalarExpressionToCol subExpr <> ".cast(" <> sparkType typeName <> ")"
