@@ -28,10 +28,12 @@ import Language.SQL.SimpleSQL.Syntax (Statement, Statement (..), QueryExpr (..),
     InPredValue, InPredValue(..), GroupingExpr(..))
 import Language.SQL.SimpleSQL.Dialect (postgres)
 
+import Prelude (head)
+
 
 run :: RIO MyApp ()
 run = liftIO $ putStrLn $ T.unpack $ parseSql [r|
-select a, b, count(c) from test group by a, b
+select a, b, c from blah A, blah2 B
 |]
 
 
@@ -44,7 +46,7 @@ parseSql src = do
            parsed
 
 parseStmts :: [Statement] -> Text
-parseStmts statements = T.intercalate "\n" $ map parseStatement statements 
+parseStmts statements = T.intercalate "\n" $ map parseStatement statements
 
 parseStatement :: Statement -> Text
 parseStatement statement = case statement of
@@ -55,11 +57,11 @@ parseStatement statement = case statement of
     blah -> T.pack (ppShow blah)
 
 parseWithBlocks :: [Name] -> [(Alias,QueryExpr)] -> QueryExpr -> Text
-parseWithBlocks insertIntoNames views queryExpression = 
+parseWithBlocks insertIntoNames views queryExpression =
     T.intercalate "\n" (map parseWithBlock views) <> "\n" <> printInsertQueryExpression insertIntoNames queryExpression
 
 parseWithBlock :: (Alias, QueryExpr) -> Text
-parseWithBlock (alias, queryExpr) = 
+parseWithBlock (alias, queryExpr) =
     "val " <> parseTableAlias alias <> " = " <> printQueryExpression queryExpr
 
 parseTableAlias :: Alias -> Text
@@ -81,24 +83,21 @@ scalaFormatTableName = T.map (\case '.' -> '_'; other -> other)
 
 printInsertQueryExpression :: [Name] -> QueryExpr -> Text
 printInsertQueryExpression insertIntoNames expression = case expression of
-    Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst -> 
+    Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst ->
         "val " <> parseNames insertIntoNames <> " = " <> printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
     With _ views queryExpression -> parseWithBlocks insertIntoNames views queryExpression
     other -> T.pack $ ppShow other
 
 printQueryExpression :: QueryExpr  -> Text
-printQueryExpression expression = case expression of 
+printQueryExpression expression = case expression of
     Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst -> printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
     other -> T.pack $ ppShow other
 
-printSelectStatement :: SetQuantifier -> [(ScalarExpr,Maybe Name)] -> [TableRef] -> Maybe ScalarExpr 
+printSelectStatement :: SetQuantifier -> [(ScalarExpr,Maybe Name)] -> [TableRef] -> Maybe ScalarExpr
     -> [GroupingExpr] -> Maybe ScalarExpr -> [SortSpec] -> Maybe ScalarExpr -> Maybe ScalarExpr -> Text
 printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst  =
-    let fromClause = case from of
-                    [] -> "empty FROM not supported"
-                    [TRSimple name] -> scalaFormatTableName $ parseNames name
-                    blah -> T.pack (ppShow blah)  in
-    let whereClause = case sWhere of 
+    let fromClause = parseFromClause from in
+    let whereClause = case sWhere of
                         Nothing -> ""
                         Just expr -> "\n  .filter(" <> parseScalarExpressionToAny expr <> ")" in
     let groupByClause = parseGroupingExpressions groupBy in
@@ -108,6 +107,20 @@ printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy
                             All -> ""
                             Distinct -> "\n  .distinct()" in
     fromClause <> whereClause <> groupByClause <> selectClause <> sqClause
+
+parseFromClause :: [TableRef] ->Text
+parseFromClause tableRefs = case tableRefs of
+    [] -> "empty FROM not supported"
+    tableRef : xs -> parseTableRef tableRef <> T.concat (map (\x -> ".join(" <> parseTableRef x <> ")") xs)
+
+parseTableRef :: TableRef -> Text
+parseTableRef tableRef = case tableRef of
+    TRSimple name -> scalaFormatTableName $ parseNames name
+    TRAlias subRef alias -> parseTableRef subRef <> ".as(\"" <> parseAlias alias <> "\")"
+    blah -> T.pack $ ppShow blah
+
+parseAlias :: Alias -> Text
+parseAlias (Alias name _) = parseName name
 
 parseSelectClause :: Text -> [(ScalarExpr,Maybe Name)] -> Text
 parseSelectClause groupByClause selectList = case groupByClause of
@@ -121,7 +134,7 @@ isAgg (expr, _) = case expr of
 
 
 parseGroupingExpressions :: [GroupingExpr] -> Text
-parseGroupingExpressions groupingExpressions = case groupingExpressions of 
+parseGroupingExpressions groupingExpressions = case groupingExpressions of
     [] -> ""
     other-> ".groupBy(" <> T.intercalate  "," (map parseGroupingExpression other) <> ")"
 
@@ -165,7 +178,7 @@ _parseScalarExpression expr = case expr of
     Star -> "col(\"*\")"
     App functionNames subExprs ->  parseAppExpression functionNames subExprs
     Cast subExpr typeName -> parseScalarExpressionToCol subExpr <> ".cast(" <> sparkType typeName <> ")"
-    Case test whens elsePart -> parseCaseExpression test whens elsePart 
+    Case test whens elsePart -> parseCaseExpression test whens elsePart
     BinOp subExpr1 funcNames subExpr2 -> parseBinOp subExpr1 funcNames subExpr2
     PostfixOp functionNames subExpr -> parseScalarExpressionToCol subExpr <> parseFunctionNames functionNames
     SpecialOp functionNames subExprs -> handleSpecialOp functionNames subExprs
@@ -173,13 +186,13 @@ _parseScalarExpression expr = case expr of
     Parens subExpr -> "(" <> parseScalarExpressionToCol subExpr <> ")"
     HostParameter name _ -> T.pack name
     In inOrNotIn subExpr predValue -> parseInExpression inOrNotIn subExpr predValue
-    unparsed -> T.pack $ ppShow unparsed 
+    unparsed -> T.pack $ ppShow unparsed
 
 
 parseInExpression :: Bool -> ScalarExpr -> InPredValue -> Text
-parseInExpression inOrNotIn expr predValue = 
+parseInExpression inOrNotIn expr predValue =
     prefix <> parseScalarExpressionToCol expr <> ".isin(" <> parseInPredicate predValue <> ")"
-    where 
+    where
         prefix = case inOrNotIn of
             True -> ""
             False -> "!"
@@ -190,7 +203,7 @@ parseInPredicate predValue = case predValue of
     InQueryExpr expr -> printQueryExpression expr
 
 parseBinOp :: ScalarExpr -> [Name] -> ScalarExpr -> Text
-parseBinOp subExpr1 funcNames subExpr2 = 
+parseBinOp subExpr1 funcNames subExpr2 =
     let functionName = parseFunctionNames funcNames in
         case functionName of
             "not like" -> "!" <> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
@@ -199,7 +212,7 @@ parseBinOp subExpr1 funcNames subExpr2 =
     where
         parsedExpr1 = parseScalarExpressionToCol subExpr1
         parsedExpr2 = parseScalarExpressionToAny subExpr2
-    
+
 
 parseIdenToCol :: [Name] -> Text
 parseIdenToCol names =
@@ -218,7 +231,7 @@ parseIdenToAny names =
             other -> "col(\"" <> other <> "\")"
 
 parseAppExpression :: [Name] -> [ScalarExpr] -> Text
-parseAppExpression functionNames subExpr = 
+parseAppExpression functionNames subExpr =
     let functionName = parseFunctionNames functionNames in
     case functionName of
         "coalesce" -> "coalesce(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
@@ -232,12 +245,12 @@ handleSpecialOp functionNames exprs = case functionNames of
 
 
 handleBetween :: [ScalarExpr] -> Text
-handleBetween exprs = case exprs of 
+handleBetween exprs = case exprs of
     [expr1, expr2, expr3] ->  parseScalarExpressionToCol expr1
-                                    <> ".between(" <> parseScalarExpressionToAny expr2 <> ", " 
+                                    <> ".between(" <> parseScalarExpressionToAny expr2 <> ", "
                                     <> parseScalarExpressionToAny expr3 <> ")"
     _ -> "unhandled"
-   
+
 
 parseFunctionNames :: [Name] -> Text
 parseFunctionNames names = case names of
