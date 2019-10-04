@@ -58,7 +58,7 @@ import           Language.SQL.SimpleSQL.Dialect ( postgres )
 
 run :: IO ()
 run = putStrLn $ T.unpack $ parseSql [r|
-select A.* from A cross join B
+select A.* from A cross join B order by b desc nulls last
 |]
 
 
@@ -174,22 +174,32 @@ printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy
                                   "\n  .filter("
                                       <> parseScalarExpressionToAny expr
                                       <> ")"
-                      in  let sqClause = case setQuantifier of
+                      in
+                          let sqClause = case setQuantifier of
                                   SQDefault -> ""
                                   All       -> ""
                                   Distinct  -> "\n  .distinct()"
-                          in  fromClause
-                              <> whereClause
-                              <> groupByClause
-                              <> selectClause
-                              <> havingClause
-                              <> sqClause
+                          in
+                              let
+                                  orderByClause = case orderBy of
+                                      [] -> ""
+                                      _ ->
+                                          "\n  .orderBy("
+                                              <> parseSortSpecs orderBy
+                                              <> ")"
+                              in  fromClause
+                                  <> whereClause
+                                  <> groupByClause
+                                  <> selectClause
+                                  <> orderByClause
+                                  <> havingClause
+                                  <> sqClause
 
 parseFromClause :: [TableRef] -> Text
 parseFromClause tableRefs = case tableRefs of
     []            -> "empty FROM not supported"
     tableRef : xs -> parseTableRef tableRef
-        <> T.concat (map (\x -> ".join(" <> parseTableRef x <> ")") xs)
+        <> T.concat (map (\x -> "\n  .join(" <> parseTableRef x <> ")") xs)
 
 parseTableRef :: TableRef -> Text
 parseTableRef tableRef = case tableRef of
@@ -204,7 +214,7 @@ parseTableJoin
     :: TableRef -> Bool -> JoinType -> TableRef -> Maybe JoinCondition -> Text
 parseTableJoin tableA _ joinType tableB maybeJoinCondition =
     parseTableRef tableA
-        <> "."
+        <> "\n  ."
         <> joinKeyword
         <> "("
         <> parseTableRef tableB
@@ -254,7 +264,7 @@ parseGroupingExpressions :: [GroupingExpr] -> Text
 parseGroupingExpressions groupingExpressions = case groupingExpressions of
     [] -> ""
     other ->
-        ".groupBy("
+        "\n  .groupBy("
             <> T.intercalate "," (map parseGroupingExpression other)
             <> ")"
 
@@ -296,6 +306,13 @@ parseScalarExpressionToAny expr = case expr of
     other             -> _parseScalarExpression other
 
 
+parseScalarExpressionNoCol :: ScalarExpr -> Text
+parseScalarExpressionNoCol expr = case expr of
+    NumLit lit        -> T.pack lit
+    StringLit _ _ lit -> "\"" <> T.pack lit <> "\""
+    Iden name         -> parseIdenNoCol name
+    other             -> _parseScalarExpression other
+
 _parseScalarExpression :: ScalarExpr -> Text
 _parseScalarExpression expr = case expr of
     Star                       -> "col(\"*\")"
@@ -328,9 +345,9 @@ parseSortSpec (SortSpec expr direction nullsOrder) =
     case (direction, nullsOrder) of
         (DirDefault, NullsOrderDefault) -> parseScalarExpressionToCol expr
         (Asc, NullsOrderDefault) ->
-            "asc(\"" <> parseScalarExpressionToAny expr <> "\")"
+            "asc(" <> parseScalarExpressionNoCol expr <> ")"
         (Desc, NullsOrderDefault) ->
-            "desc(\"" <> parseScalarExpressionToAny expr <> "\")"
+            "desc(" <> parseScalarExpressionNoCol expr <> ")"
         (DirDefault, NullsFirst) ->
             parseScalarExpressionToCol expr <> ".asc_nulls_first()"
         (Asc, NullsFirst) ->
@@ -412,6 +429,15 @@ parseIdenToAny names =
             "TRUE"  -> "true"
             "FALSE" -> "false"
             other   -> "col(\"" <> other <> "\")"
+
+parseIdenNoCol :: [Name] -> Text
+parseIdenNoCol names = 
+    let parsedName = parseNamesInUsingClause names
+    in  case parsedName of
+        "TRUE"  -> "true"
+        "FALSE" -> "false"
+        other   -> other
+
 
 parseAppExpression :: [Name] -> [ScalarExpr] -> Text
 parseAppExpression functionNames subExpr =
