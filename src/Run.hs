@@ -21,13 +21,13 @@ import Language.SQL.SimpleSQL.Syntax (Statement, Statement (..), QueryExpr (..),
     ScalarExpr, TableRef, GroupingExpr, SortSpec, Name, TableRef (..), Name(..), ScalarExpr(..),
     TypeName, TypeName (..), InsertSource, InsertSource(..), SetQuantifier(..), Alias, Alias(..),
     InPredValue, InPredValue(..), GroupingExpr(..), JoinType, JoinType(..), JoinCondition,
-    JoinCondition(..), Frame, SortSpec, SortSpec(..), Direction(..))
+    JoinCondition(..), Frame, SortSpec, SortSpec(..), Direction(..), NullsOrder(..))
 import Language.SQL.SimpleSQL.Dialect (postgres)
 
 
 run :: IO ()
 run = putStrLn $ T.unpack $ parseSql [r|
-select * from A cross join B
+select A.* from A cross join B
 |]
 
 
@@ -213,10 +213,16 @@ parseSortSpecs :: [SortSpec] -> Text
 parseSortSpecs sortSpecs = T.intercalate "," $ map parseSortSpec sortSpecs
 
 parseSortSpec :: SortSpec -> Text
-parseSortSpec (SortSpec expr direction nullsOrder) = case direction of
-    DirDefault -> parseScalarExpressionToCol expr
-    Asc -> "asc(\"" <> parseScalarExpressionToAny expr <> "\")"
-    Desc -> "desc(\"" <> parseScalarExpressionToAny expr <> "\")"
+parseSortSpec (SortSpec expr direction nullsOrder) = case (direction, nullsOrder) of
+    (DirDefault, NullsOrderDefault) -> parseScalarExpressionToCol expr
+    (Asc, NullsOrderDefault) -> "asc(\"" <> parseScalarExpressionToAny expr <> "\")"
+    (Desc, NullsOrderDefault) -> "desc(\"" <> parseScalarExpressionToAny expr <> "\")"
+    (DirDefault, NullsFirst) -> parseScalarExpressionToCol expr <> ".asc_nulls_first()"
+    (Asc, NullsFirst) -> parseScalarExpressionToCol expr <> ".asc_nulls_first()"
+    (Desc, NullsFirst) -> parseScalarExpressionToCol expr <> ".desc_nulls_first()"
+    (DirDefault, NullsLast) -> parseScalarExpressionToCol expr <> ".asc_nulls_last()"
+    (Asc, NullsLast) -> parseScalarExpressionToCol expr <> ".asc_nulls_last()"
+    (Desc, NullsLast) -> parseScalarExpressionToCol expr <> ".desc_nulls_last()"
 
 parseWindowFunction :: [Name] -> [ScalarExpr] -> [ScalarExpr] -> [SortSpec] -> Maybe Frame -> Text 
 parseWindowFunction names _ partition orderBy _ = 
@@ -240,11 +246,20 @@ parseBinOp subExpr1 funcNames subExpr2 =
         case functionName of
             "not like" -> "!" <> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
             "like" -> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
+            -- This is where the AST gets fucked up, thinks a schema dot separator is a function
+            "." -> handleSpecialCaseForDotSeperator subExpr1 subExpr2
             _ -> parsedExpr1 <> " " <> functionName <> " " <> parsedExpr2
     where
         parsedExpr1 = parseScalarExpressionToCol subExpr1
         parsedExpr2 = parseScalarExpressionToAny subExpr2
 
+
+handleSpecialCaseForDotSeperator :: ScalarExpr -> ScalarExpr -> Text
+handleSpecialCaseForDotSeperator expr1 expr2 = "col(\"" <> parsedTableAndColumn <> "\")"
+    where
+        parsedTableAndColumn = case (expr1, expr2) of 
+            (Iden name1, Iden name2) -> parseNamesInsideIden name1 <> "." <> parseNamesInsideIden name2
+            (Iden name1, Star) -> parseNamesInsideIden name1 <> ".*"
 
 parseIdenToCol :: [Name] -> Text
 parseIdenToCol names =
