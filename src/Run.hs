@@ -260,6 +260,7 @@ handleSpecialCaseForDotSeperator expr1 expr2 = "col(\"" <> parsedTableAndColumn 
         parsedTableAndColumn = case (expr1, expr2) of 
             (Iden name1, Iden name2) -> parseNamesInsideIden name1 <> "." <> parseNamesInsideIden name2
             (Iden name1, Star) -> parseNamesInsideIden name1 <> ".*"
+            _ -> "error"
 
 parseIdenToCol :: [Name] -> Text
 parseIdenToCol names =
