@@ -25,15 +25,14 @@ import Language.SQL.SimpleSQL.Parse
 import Language.SQL.SimpleSQL.Syntax (Statement, Statement (..), QueryExpr (..), SetQuantifier,
     ScalarExpr, TableRef, GroupingExpr, SortSpec, Name, TableRef (..), Name(..), ScalarExpr(..),
     TypeName, TypeName (..), InsertSource, InsertSource(..), SetQuantifier(..), Alias, Alias(..),
-    InPredValue, InPredValue(..), GroupingExpr(..))
+    InPredValue, InPredValue(..), GroupingExpr(..), JoinType, JoinType(..), JoinCondition,
+    JoinCondition(..))
 import Language.SQL.SimpleSQL.Dialect (postgres)
-
-import Prelude (head)
 
 
 run :: RIO MyApp ()
 run = liftIO $ putStrLn $ T.unpack $ parseSql [r|
-select a, b, c from blah A, blah2 B
+select A.a, B.b, c from schema.blah A left join schema.blah2 B using (a, b)
 |]
 
 
@@ -84,7 +83,7 @@ scalaFormatTableName = T.map (\case '.' -> '_'; other -> other)
 printInsertQueryExpression :: [Name] -> QueryExpr -> Text
 printInsertQueryExpression insertIntoNames expression = case expression of
     Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst ->
-        "val " <> parseNames insertIntoNames <> " = " <> printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
+        "val " <> parseNamesInsideIden insertIntoNames <> " = " <> printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
     With _ views queryExpression -> parseWithBlocks insertIntoNames views queryExpression
     other -> T.pack $ ppShow other
 
@@ -115,9 +114,32 @@ parseFromClause tableRefs = case tableRefs of
 
 parseTableRef :: TableRef -> Text
 parseTableRef tableRef = case tableRef of
-    TRSimple name -> scalaFormatTableName $ parseNames name
+    TRJoin tableA isNatural joinType tableB maybeJoinCondition -> parseTableJoin tableA isNatural joinType tableB maybeJoinCondition
+    TRSimple name -> scalaFormatTableName $ parseNamesInsideIden name
     TRAlias subRef alias -> parseTableRef subRef <> ".as(\"" <> parseAlias alias <> "\")"
     blah -> T.pack $ ppShow blah
+
+parseTableJoin :: TableRef -> Bool -> JoinType -> TableRef -> Maybe JoinCondition -> Text
+parseTableJoin tableA isNatural joinType tableB maybeJoinCondition = 
+    parseTableRef tableA <> "." <> joinKeyword <> "(" <> parseTableRef tableB <> parseJoinCondition maybeJoinCondition <> parseJoinType joinType <> ")"
+    where
+        joinKeyword = case joinType of
+            JCross -> "crossJoin"
+            _ -> "join"
+
+parseJoinType :: JoinType -> Text
+parseJoinType joinType = case joinType of
+    JInner -> ""
+    JLeft -> ", \"left\""
+    JRight -> ", \"right\""
+    JFull -> ", \"outer\""
+    JCross -> ""
+    
+parseJoinCondition :: Maybe JoinCondition -> Text
+parseJoinCondition Nothing = ""
+parseJoinCondition (Just joinCondition) = case joinCondition of
+    JoinOn expr -> ", " <> parseScalarExpressionToAny expr 
+    JoinUsing names -> ", Seq(" <> parseNamesInUsingClause names <> ")"
 
 parseAlias :: Alias -> Text
 parseAlias (Alias name _) = parseName name
@@ -145,7 +167,7 @@ parseGroupingExpression groupingExpr = case groupingExpr of
 
 parseSelectList :: (ScalarExpr,Maybe Name) -> Text
 parseSelectList col = case col of
-    (expr, Just name) -> parseScalarExpressionToCol expr <> ".as(\"" <> parseNames [name] <> "\")"
+    (expr, Just name) -> parseScalarExpressionToCol expr <> ".as(\"" <> parseNamesInsideIden [name] <> "\")"
     (expr, Nothing) -> parseScalarExpressionToCol expr
 
 
@@ -216,7 +238,7 @@ parseBinOp subExpr1 funcNames subExpr2 =
 
 parseIdenToCol :: [Name] -> Text
 parseIdenToCol names =
-    let parsedName = parseNames names in
+    let parsedName = parseNamesInsideIden names in
         case parsedName of
             "TRUE" -> "lit(true)"
             "FALSE" -> "lit(false)"
@@ -224,7 +246,7 @@ parseIdenToCol names =
 
 parseIdenToAny :: [Name] -> Text
 parseIdenToAny names =
-    let parsedName = parseNames names in
+    let parsedName = parseNamesInsideIden names in
         case parsedName of
             "TRUE" -> "true"
             "FALSE" -> "false"
@@ -263,8 +285,11 @@ parseFunctionName name = case name of
     Name Nothing subName -> sparkFunction $ T.pack subName
     other -> T.pack $ ppShow other
 
-parseNames :: [Name] -> Text
-parseNames names = case names of
+parseNamesInUsingClause :: [Name] -> Text
+parseNamesInUsingClause names = T.intercalate "," $ map (\x -> "\"" <> parseName x <> "\"") names
+
+parseNamesInsideIden :: [Name] -> Text
+parseNamesInsideIden names = case names of
     [name] -> parseName name
     [schemaName, name] -> parseName schemaName <> "." <> parseName name
     other -> T.pack $ ppShow other
