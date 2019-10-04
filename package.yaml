@@ -21,10 +21,10 @@ description:         Please see the README on Github at <https://github.com/gith
 
 dependencies:
 - base >= 4.11 && < 10
-- rio >= 0.1.8.0
 - simple-sql-parser
 - pretty-show
 - raw-strings-qq
+- text
 
 ghc-options:
 - -Wall

@@ -1,4 +1,3 @@
-{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE LambdaCase #-}
@@ -6,16 +5,12 @@
 
 module Run (run, parseSql) where
 
-
-import Import
-
-import System.IO
-
 import Text.RawString.QQ
 
 import Text.Show.Pretty (ppShow)
 
-import qualified RIO.Text as T
+import qualified Data.Text as T
+import Data.Text (Text)
 
 import Language.SQL.SimpleSQL.Parse
        (parseStatements
@@ -26,13 +21,13 @@ import Language.SQL.SimpleSQL.Syntax (Statement, Statement (..), QueryExpr (..),
     ScalarExpr, TableRef, GroupingExpr, SortSpec, Name, TableRef (..), Name(..), ScalarExpr(..),
     TypeName, TypeName (..), InsertSource, InsertSource(..), SetQuantifier(..), Alias, Alias(..),
     InPredValue, InPredValue(..), GroupingExpr(..), JoinType, JoinType(..), JoinCondition,
-    JoinCondition(..))
+    JoinCondition(..), Frame, SortSpec, SortSpec(..), Direction(..))
 import Language.SQL.SimpleSQL.Dialect (postgres)
 
 
-run :: RIO MyApp ()
-run = liftIO $ putStrLn $ T.unpack $ parseSql [r|
-select A.a, B.b, c from schema.blah A left join schema.blah2 B using (a, b)
+run :: IO ()
+run = putStrLn $ T.unpack $ parseSql [r|
+select * from A cross join B
 |]
 
 
@@ -136,7 +131,7 @@ parseJoinType joinType = case joinType of
     JLeft -> ", \"left\""
     JRight -> ", \"right\""
     JFull -> ", \"outer\""
-    JCross -> ""
+    JCross -> ""  -- the cross join condition is handled with .crossJoin instead of .join in Spark
     
 parseJoinCondition :: Maybe JoinCondition -> Text
 parseJoinCondition Nothing = ""
@@ -169,9 +164,9 @@ parseGroupingExpression groupingExpr = case groupingExpr of
     other -> T.pack $ ppShow other
 
 parseSelectList :: (ScalarExpr,Maybe Name) -> Text
-parseSelectList col = case col of
-    (expr, Just name) -> parseScalarExpressionToCol expr <> ".as(\"" <> parseNamesInsideIden [name] <> "\")"
-    (expr, Nothing) -> parseScalarExpressionToCol expr
+parseSelectList (expr, alias) = parseScalarExpressionToCol expr <> case alias of
+    Just name -> ".as(\"" <> parseNamesInsideIden [name] <> "\")"
+    Nothing -> ""
 
 
 parseScalarExpressionsGeneral :: [ScalarExpr] -> Text
@@ -211,8 +206,22 @@ _parseScalarExpression expr = case expr of
     Parens subExpr -> "(" <> parseScalarExpressionToCol subExpr <> ")"
     HostParameter name _ -> T.pack name
     In inOrNotIn subExpr predValue -> parseInExpression inOrNotIn subExpr predValue
+    WindowApp names args partition orderBy frame -> parseWindowFunction names args partition orderBy frame
     unparsed -> T.pack $ ppShow unparsed
 
+parseSortSpecs :: [SortSpec] -> Text
+parseSortSpecs sortSpecs = T.intercalate "," $ map parseSortSpec sortSpecs
+
+parseSortSpec :: SortSpec -> Text
+parseSortSpec (SortSpec expr direction nullsOrder) = case direction of
+    DirDefault -> parseScalarExpressionToCol expr
+    Asc -> "asc(\"" <> parseScalarExpressionToAny expr <> "\")"
+    Desc -> "desc(\"" <> parseScalarExpressionToAny expr <> "\")"
+
+parseWindowFunction :: [Name] -> [ScalarExpr] -> [ScalarExpr] -> [SortSpec] -> Maybe Frame -> Text 
+parseWindowFunction names _ partition orderBy _ = 
+    parseNamesInsideIden names <> "().over(Window.partitionBy(" <> parseScalarExpressionsGeneral partition <> ").orderBy("
+        <> parseSortSpecs orderBy <> ")"
 
 parseInExpression :: Bool -> ScalarExpr -> InPredValue -> Text
 parseInExpression inOrNotIn expr predValue =
@@ -298,7 +307,7 @@ parseNamesInsideIden names = case names of
 parseName :: Name -> Text
 parseName name = case name of
     Name Nothing subName -> T.pack subName
-    other -> T.pack $ ppShow other
+    other -> T.pack (ppShow other)
 
 parseCaseExpression :: Maybe ScalarExpr -> [([ScalarExpr],ScalarExpr)] -> Maybe ScalarExpr -> Text
 parseCaseExpression _ whens elsePart =
@@ -315,6 +324,7 @@ sparkFunction function = case T.toLower function of
     "nvl" -> "coalesce"
     "strpos" -> "instr"
     "is null" -> ".isNull()"
+    "is not null" -> ".isNotNull()"
     "=" -> "==="
     "is true" -> " === true"
     "is false" -> " === false"
@@ -325,6 +335,7 @@ sparkFunction function = case T.toLower function of
 
 sparkType :: TypeName -> Text
 sparkType typeName = case typeName of
-    TypeName name -> T.pack $ ppShow name
+    TypeName [Name Nothing "int8"] -> "DataTypes.LongType"
+    TypeName [name] -> T.pack $ ppShow name
     PrecTypeName [Name Nothing "varchar"] _ -> "DataTypes.StringType"
     blah -> T.pack $ ppShow blah
