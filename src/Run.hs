@@ -94,18 +94,21 @@ printQueryExpression expression = case expression of
 
 printSelectStatement :: SetQuantifier -> [(ScalarExpr,Maybe Name)] -> [TableRef] -> Maybe ScalarExpr
     -> [GroupingExpr] -> Maybe ScalarExpr -> [SortSpec] -> Maybe ScalarExpr -> Maybe ScalarExpr -> Text
-printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst  =
+printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy _ _  =
     let fromClause = parseFromClause from in
     let whereClause = case sWhere of
                         Nothing -> ""
                         Just expr -> "\n  .filter(" <> parseScalarExpressionToAny expr <> ")" in
     let groupByClause = parseGroupingExpressions groupBy in
     let selectClause = parseSelectClause groupByClause selectList in
+    let havingClause = case having of
+            Nothing -> ""
+            Just expr -> "\n  .filter(" <> parseScalarExpressionToAny expr <> ")" in
     let sqClause = case setQuantifier of
                             SQDefault -> ""
                             All -> ""
                             Distinct -> "\n  .distinct()" in
-    fromClause <> whereClause <> groupByClause <> selectClause <> sqClause
+    fromClause <> whereClause <> groupByClause <> selectClause <> havingClause <> sqClause
 
 parseFromClause :: [TableRef] ->Text
 parseFromClause tableRefs = case tableRefs of
@@ -120,7 +123,7 @@ parseTableRef tableRef = case tableRef of
     blah -> T.pack $ ppShow blah
 
 parseTableJoin :: TableRef -> Bool -> JoinType -> TableRef -> Maybe JoinCondition -> Text
-parseTableJoin tableA isNatural joinType tableB maybeJoinCondition = 
+parseTableJoin tableA _ joinType tableB maybeJoinCondition = 
     parseTableRef tableA <> "." <> joinKeyword <> "(" <> parseTableRef tableB <> parseJoinCondition maybeJoinCondition <> parseJoinType joinType <> ")"
     where
         joinKeyword = case joinType of
@@ -215,9 +218,7 @@ parseInExpression :: Bool -> ScalarExpr -> InPredValue -> Text
 parseInExpression inOrNotIn expr predValue =
     prefix <> parseScalarExpressionToCol expr <> ".isin(" <> parseInPredicate predValue <> ")"
     where
-        prefix = case inOrNotIn of
-            True -> ""
-            False -> "!"
+        prefix = if inOrNotIn then "" else "!"
 
 parseInPredicate :: InPredValue -> Text
 parseInPredicate predValue = case predValue of
