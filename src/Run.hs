@@ -449,11 +449,28 @@ parseAppExpression functionNames subExpr =
         case functionName of
             "coalesce" ->
                 "coalesce(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
+            "greatest" ->
+                "greatest(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
+            "least" ->
+                "least(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
+            "date_part" -> parseDatePart subExpr
             _ ->
                 functionName
                     <> "("
                     <> parseScalarExpressionsGeneral subExpr
                     <> ")"
+
+parseDatePart :: [ScalarExpr] -> Text
+parseDatePart [expr1, expr2] = 
+    case firstExpr of 
+        "\"month\"" -> "month(" <> secondExpr <> ")"
+        "\"day\"" -> "day(" <> secondExpr <> ")"
+        "\"year\"" -> "year(" <> secondExpr <> ")"
+        _ -> "parseError " <> firstExpr
+    where 
+        firstExpr = parseScalarExpressionNoCol expr1
+        secondExpr = parseScalarExpressionToCol expr2
+parseDatePart _ = "parseError"
 
 -- Currently used to handle between
 handleSpecialOp :: [Name] -> [ScalarExpr] -> Text
@@ -526,6 +543,7 @@ sparkFunction function = case T.toLower function of
     "is null"      -> ".isNull()"
     "is not null"  -> ".isNotNull()"
     "="            -> "==="
+    "<>"           -> "=!="
     "is true"      -> " === true"
     "is false"     -> " === false"
     "is not true"  -> " =!= true"
