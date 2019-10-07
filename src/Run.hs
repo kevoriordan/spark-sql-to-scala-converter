@@ -420,6 +420,7 @@ parseIdenToCol names =
     in  case parsedName of
             "TRUE"  -> "lit(true)"
             "FALSE" -> "lit(false)"
+            "NULL" -> "lit(null)"
             other   -> "col(\"" <> other <> "\")"
 
 parseIdenToAny :: [Name] -> Text
@@ -428,6 +429,7 @@ parseIdenToAny names =
     in  case parsedName of
             "TRUE"  -> "true"
             "FALSE" -> "false"
+            "NULL" -> "null"
             other   -> "col(\"" <> other <> "\")"
 
 parseIdenNoCol :: [Name] -> Text
@@ -436,6 +438,7 @@ parseIdenNoCol names =
     in  case parsedName of
         "TRUE"  -> "true"
         "FALSE" -> "false"
+        "NULL" -> "null"
         other   -> other
 
 
