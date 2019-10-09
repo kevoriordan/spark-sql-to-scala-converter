@@ -63,12 +63,65 @@ data UnhandledError = UnhandledError
                         } deriving (Show)
 
 run :: IO ()
-run = let parsedSql = parseSql [r|
-select A.* from A cross join B order by b desc nulls last
-|] in
-    case parsedSql of
-        Right parsed -> putStrLn $ T.unpack parsed
-        Left err -> print err
+run =
+    let parsedSql = parseSql [r|
+    select A.member_id,
+    A.start_month, A.end_month, A.start_trail12, A.end_trail12, 
+    A.start_year, A.end_year, A.begin_start_year, A.begin_end_year, A.end_start_year, A.start_year_months, A.end_year_months,
+   A.sal_private_exbonus_end_year_trail12,
+   A.sal_private_exbonus_begin_year_trail12,
+   A.sal_private_exbonus_begin_year_whole,
+   A.sal_private_end_year,
+   A.sal_private_begin_year_trail12,
+   A.sal_private_begin_year_whole,
+   nvl(A.sal_private_begin_year_whole,0) - nvl(A.sal_private_begin_year_trail12,0) as sal_private_begin_year_pre_trail12,
+   CASE WHEN A.end_start_year IS NOT NULL
+       THEN Tbeg.fedicare_salt_tax_low + Tbeg.fedicare_salt_tax_slope*(A.sal_private_exbonus_begin_year_whole - Tbeg.net_pay_low)
+   ELSE 0.00  END as subTAX_sal_private_exbonus_begin_year_whole,
+   
+   
+   
+   CASE WHEN A.end_start_year IS NOT NULL  and nvl(A.sal_private_exbonus_begin_year_whole,0)>0 
+       THEN Tbeg.fedicare_salt_tax_low*(A.sal_private_exbonus_begin_year_trail12/A.sal_private_exbonus_begin_year_whole) 
+       + Tbeg.fedicare_salt_tax_slope*(A.sal_private_exbonus_begin_year_trail12 - Tbeg.net_pay_low*((A.sal_private_exbonus_begin_year_trail12/A.sal_private_exbonus_begin_year_whole)))
+   ELSE 0.00  END as subTAX_sal_private_exbonus_begin_year_trail12,
+   
+   
+   
+   CASE 
+           WHEN  month(start_month)=1
+           THEN Tend.fedicare_salt_tax_low + Tend.fedicare_salt_tax_slope*(A.sal_private_exbonus_end_year_trail12 - Tend.net_pay_low)
+           WHEN  (month(start_month) between 2 and 6) and nvl(A.sal_private_exbonus_end_year_trail12,0)+nvl(A.sal_private_exbonus_begin_year_trail12,0)>0
+           THEN Tend.fedicare_salt_tax_low*(A.sal_private_exbonus_end_year_trail12/(A.sal_private_exbonus_end_year_trail12+A.sal_private_exbonus_begin_year_trail12))
+                       + Tend.fedicare_salt_tax_slope*(A.sal_private_exbonus_end_year_trail12 - Tend.net_pay_low*(A.sal_private_exbonus_end_year_trail12/(A.sal_private_exbonus_end_year_trail12+A.sal_private_exbonus_begin_year_trail12)))
+           WHEN  month(start_month)>6
+           THEN Tend.fedicare_salt_tax_low*((end_year_months*1.0)/12) + Tend.fedicare_salt_tax_slope*(A.sal_private_exbonus_end_year_trail12 - Tend.net_pay_low*((end_year_months*1.0)/12) )
+   ELSE 0.00 END as subTAX_sal_private_exbonus_end_year --,
+   from cs_spend_payr_cal3 A 
+   LEFT JOIN tax_lookup_table_range Tbeg 
+   ON nvl(A.tax_city_start_year,'XX')=nvl(Tbeg.tax_city,'XX') AND nvl(A.tax_state_start_year,'XX')=nvl(Tbeg.tax_state,'XX') 
+   AND A.start_year=Tbeg.tax_year 
+   -- can't do between because will double count if on the line. 
+   AND A.sal_private_exbonus_begin_year_whole>=  Tbeg.net_pay_low
+   AND LEAST(100000000 - 0.01, A.sal_private_exbonus_begin_year_whole)<  Tbeg.net_pay_high
+   
+   LEFT JOIN tax_lookup_table_range Tend 
+   ON nvl(A.tax_city_end_year,'XX')=nvl(Tend.tax_city,'XX') AND nvl(A.tax_state_end_year,'XX')=nvl(Tend.tax_state,'XX') 
+   AND A.end_year=Tend.tax_year 
+   -- can't do between because will double count if on the line.
+   -- must gross up private end_year.  If <6 months of year use TRAILING 12 for bracket, if 6 or more use (12/num months)*end_trail12 amount
+   AND CASE WHEN month(start_month)=1 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)
+           When month(start_month) between 2 and 6 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)+nvl(A.sal_private_exbonus_begin_year_trail12,0)
+           ELSE nvl(A.sal_private_exbonus_end_year_trail12,0)*(12/(end_year_months*1.0)) END 
+                                   >=  Tend.net_pay_low
+   AND LEAST(100000000 - 0.01, CASE WHEN month(start_month)=1 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)
+           When month(start_month) between 2 and 6 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)+nvl(A.sal_private_exbonus_begin_year_trail12,0)
+           ELSE nvl(A.sal_private_exbonus_end_year_trail12,0)*(12/(end_year_months*1.0)) END )
+                                   < 	 Tend.net_pay_high
+                                   |]
+    in  case parsedSql of
+            Right parsed -> putStrLn $ T.unpack parsed
+            Left  err    -> print err
 
 
 parseSql :: String -> Either UnhandledError Text
@@ -88,34 +141,35 @@ parseStatement statement = case statement of
     Insert names _ insertSource     -> parseInsertStatement names insertSource
     DropTable   _ _                 -> Right ""
     CreateTable _ _                 -> Right ""
-    blah                            -> parseError "Can't parse top level statement" blah
+    blah -> parseError "Can't parse top level statement" blah
 
-parseWithBlocks :: [Name] -> [(Alias, QueryExpr)] -> QueryExpr -> Either UnhandledError Text
+parseWithBlocks
+    :: [Name] -> [(Alias, QueryExpr)] -> QueryExpr -> Either UnhandledError Text
 parseWithBlocks insertIntoNames views queryExpression = do
-    parsedViews <- traverse parseWithBlock views
-    parsedInsertQuery <- printInsertQueryExpression insertIntoNames queryExpression
-    pure $ T.intercalate "\n" parsedViews
-        <> "\n"
-        <> parsedInsertQuery
+    parsedViews       <- traverse parseWithBlock views
+    parsedInsertQuery <- printInsertQueryExpression insertIntoNames
+                                                    queryExpression
+    pure $ T.intercalate "\n" parsedViews <> "\n" <> parsedInsertQuery
 
 parseWithBlock :: (Alias, QueryExpr) -> Either UnhandledError Text
-parseWithBlock (alias, queryExpr) =
-    do
-        parsedAlias <- parseTableAlias alias
-        parsedQueryExpr <- printQueryExpression queryExpr
-        pure $ "val " <> parsedAlias <> " = " <> parsedQueryExpr
+parseWithBlock (alias, queryExpr) = do
+    parsedAlias     <- parseTableAlias alias
+    parsedQueryExpr <- printQueryExpression queryExpr
+    pure $ "val " <> parsedAlias <> " = " <> parsedQueryExpr
 
 parseTableAlias :: Alias -> Either UnhandledError Text
 parseTableAlias alias = case alias of
     Alias name Nothing -> parseName name
-    other              -> Left $ UnhandledError "Can't parse table alias" (T.pack $ ppShow other)
+    other ->
+        Left $ UnhandledError "Can't parse table alias" (T.pack $ ppShow other)
 
 
 parseInsertStatement :: [Name] -> InsertSource -> Either UnhandledError Text
 parseInsertStatement insertIntoNames insertSource = case insertSource of
     InsertQuery queryExpr ->
         printInsertQueryExpression insertIntoNames queryExpr
-    blah -> Left $ UnhandledError "Can't handle insert source " (T.pack (ppShow blah))
+    blah -> Left $ UnhandledError "Can't handle insert source "
+                                  (T.pack (ppShow blah))
 
 
 scalaFormatTableName :: Text -> Text
@@ -130,20 +184,17 @@ printInsertQueryExpression :: [Name] -> QueryExpr -> Either UnhandledError Text
 printInsertQueryExpression insertIntoNames expression = case expression of
     Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
         -> do
-            parsedNames <- parseNamesInsideIden insertIntoNames
+            parsedNames  <- parseNamesInsideIden insertIntoNames
             parsedSelect <- printSelectStatement setQuantifier
-                selectList
-                from
-                sWhere
-                groupBy
-                having
-                orderBy
-                offset
-                fetchFirst
-            pure $ "val "
-                <> parsedNames
-                <> " = "
-                <> parsedSelect
+                                                 selectList
+                                                 from
+                                                 sWhere
+                                                 groupBy
+                                                 having
+                                                 orderBy
+                                                 offset
+                                                 fetchFirst
+            pure $ "val " <> parsedNames <> " = " <> parsedSelect
     With _ views queryExpression ->
         parseWithBlocks insertIntoNames views queryExpression
     other -> parseError "can't parse insert query" other
@@ -175,38 +226,38 @@ printSelectStatement
     -> Either UnhandledError Text
 printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy _ _
     = do
-        fromClause <- parseFromClause from
+        fromClause  <- parseFromClause from
         whereClause <- case sWhere of
-            Nothing -> Right ""
-            Just expr -> (\x -> "\n  .filter(" <> x <> ")") <$> parseScalarExpressionToAny expr
+            Nothing   -> Right ""
+            Just expr -> (\x -> "\n  .filter(" <> x <> ")")
+                <$> parseScalarExpressionToAny expr
         groupByClause <- parseGroupingExpressions groupBy
-        selectClause <- parseSelectClause groupByClause selectList
-        havingClause <- case having of
-            Nothing -> Right ""
-            Just expr -> (\x -> "\n  .filter(" <> x <> ")") <$> parseScalarExpressionToAny expr
+        selectClause  <- parseSelectClause groupByClause selectList
+        havingClause  <- case having of
+            Nothing   -> Right ""
+            Just expr -> (\x -> "\n  .filter(" <> x <> ")")
+                <$> parseScalarExpressionToAny expr
         let sqClause = case setQuantifier of
-                            SQDefault -> ""
-                            All       -> ""
-                            Distinct  -> "\n  .distinct()"
+                SQDefault -> ""
+                All       -> ""
+                Distinct  -> "\n  .distinct()"
         orderByClause <- case orderBy of
             [] -> Right ""
-            _ -> (\x ->
-                "\n  .orderBy("
-                    <> x
-                    <> ")") <$> parseSortSpecs orderBy
-        pure $  fromClause
-                                  <> whereClause
-                                  <> groupByClause
-                                  <> selectClause
-                                  <> orderByClause
-                                  <> havingClause
-                                  <> sqClause
+            _  -> (\x -> "\n  .orderBy(" <> x <> ")") <$> parseSortSpecs orderBy
+        pure
+            $  fromClause
+            <> whereClause
+            <> groupByClause
+            <> selectClause
+            <> orderByClause
+            <> havingClause
+            <> sqClause
 
 parseFromClause :: [TableRef] -> Either UnhandledError Text
 parseFromClause tableRefs = case tableRefs of
     []            -> parseError "empty FROM not supported" ""
     tableRef : xs -> do
-        parsedHead <- parseTableRef tableRef
+        parsedHead  <- parseTableRef tableRef
         parsedTail1 <- traverse parseTableRef xs
         let parsedTail2 = fmap (\x -> "\n  .join(" <> x <> ")") parsedTail1
         pure $ parsedHead <> T.concat parsedTail2
@@ -215,21 +266,27 @@ parseTableRef :: TableRef -> Either UnhandledError Text
 parseTableRef tableRef = case tableRef of
     TRJoin tableA isNatural joinType tableB maybeJoinCondition ->
         parseTableJoin tableA isNatural joinType tableB maybeJoinCondition
-    TRSimple name -> scalaFormatTableName <$> parseNamesInsideIden name
+    TRSimple name        -> scalaFormatTableName <$> parseNamesInsideIden name
     TRAlias subRef alias -> do
         parsedSubRef <- parseTableRef subRef
-        parsedAlias <- parseAlias alias
+        parsedAlias  <- parseAlias alias
         pure $ parsedSubRef <> ".as(\"" <> parsedAlias <> "\")"
     blah -> parseError "can't parse table ref" blah
 
 parseTableJoin
-    :: TableRef -> Bool -> JoinType -> TableRef -> Maybe JoinCondition -> Either UnhandledError Text
+    :: TableRef
+    -> Bool
+    -> JoinType
+    -> TableRef
+    -> Maybe JoinCondition
+    -> Either UnhandledError Text
 parseTableJoin tableA _ joinType tableB maybeJoinCondition = do
-    parsedTableRefA <- parseTableRef tableA
-    parsedTableRefB <- parseTableRef tableB
+    parsedTableRefA     <- parseTableRef tableA
+    parsedTableRefB     <- parseTableRef tableB
     parsedJoinCondition <- parseJoinCondition maybeJoinCondition
     let parsedJoinType = parseJoinType joinType
-    pure $ parsedTableRefA
+    pure
+        $  parsedTableRefA
         <> "\n  ."
         <> joinKeyword
         <> "("
@@ -253,22 +310,21 @@ parseJoinType joinType = case joinType of
 parseJoinCondition :: Maybe JoinCondition -> Either UnhandledError Text
 parseJoinCondition Nothing              = Right ""
 parseJoinCondition (Just joinCondition) = case joinCondition of
-    JoinOn    expr  -> (", " <>) <$> parseScalarExpressionToAny expr
-    JoinUsing names -> (\x -> ", Seq(" <> x <> ")") <$> parseNamesInUsingClause names
+    JoinOn expr -> (", " <>) <$> parseScalarExpressionToAny expr
+    JoinUsing names ->
+        (\x -> ", Seq(" <> x <> ")") <$> parseNamesInUsingClause names
 
 parseAlias :: Alias -> Either UnhandledError Text
 parseAlias (Alias name _) = parseName name
 
-parseSelectClause :: Text -> [(ScalarExpr, Maybe Name)] -> Either UnhandledError Text
+parseSelectClause
+    :: Text -> [(ScalarExpr, Maybe Name)] -> Either UnhandledError Text
 parseSelectClause groupByClause selectList = case groupByClause of
-    "" -> (\x ->
-        "\n  .select("
-            <> T.intercalate ", " x
-            <> ")") <$> traverse parseSelectList selectList
-    _ -> (\x ->
-        "\n  .agg("
-            <> T.intercalate "," x
-            <> ")") <$> traverse parseSelectList (filter isAgg selectList)
+    "" ->
+        (\x -> "\n  .select(" <> T.intercalate ", " x <> ")")
+            <$> traverse parseSelectList selectList
+    _ -> (\x -> "\n  .agg(" <> T.intercalate "," x <> ")")
+        <$> traverse parseSelectList (filter isAgg selectList)
 
 isAgg :: (ScalarExpr, Maybe Name) -> Bool
 isAgg (expr, _) = case expr of
@@ -279,22 +335,24 @@ isAgg (expr, _) = case expr of
 parseGroupingExpressions :: [GroupingExpr] -> Either UnhandledError Text
 parseGroupingExpressions groupingExpressions = case groupingExpressions of
     [] -> Right ""
-    other -> (\x ->
-        "\n  .groupBy("
-            <> T.intercalate "," x
-            <> ")") <$> traverse parseGroupingExpression other
+    other ->
+        (\x -> "\n  .groupBy(" <> T.intercalate "," x <> ")")
+            <$> traverse parseGroupingExpression other
 
 parseGroupingExpression :: GroupingExpr -> Either UnhandledError Text
 parseGroupingExpression groupingExpr = case groupingExpr of
     SimpleGroup scalarExpr -> parseScalarExpressionToCol scalarExpr
-    other                  -> Left $ UnhandledError "parseGroupingExpr err" (T.pack $ ppShow other)
+    other ->
+        Left $ UnhandledError "parseGroupingExpr err" (T.pack $ ppShow other)
 
 parseSelectList :: (ScalarExpr, Maybe Name) -> Either UnhandledError Text
-parseSelectList (expr, alias) =
-    parseScalarExpressionToCol expr <> case alias of
-        Just name -> (\x -> ".as(\"" <> x <> "\")") <$> parseNamesInsideIden [name]
-        Nothing   -> Right ""
-
+parseSelectList (expr, alias) = do
+    parsedAlias <- case alias of
+        Just name ->
+            (\x -> ".as(\"" <> x <> "\")") <$> parseNamesInsideIden [name]
+        Nothing -> Right ""
+    parsedScalarExpression <- parseScalarExpressionToCol expr
+    pure $ parsedScalarExpression <> parsedAlias
 
 parseScalarExpressionsGeneral :: [ScalarExpr] -> Either UnhandledError Text
 parseScalarExpressionsGeneral exprs =
@@ -331,23 +389,21 @@ parseScalarExpressionNoCol expr = case expr of
 
 _parseScalarExpression :: ScalarExpr -> Either UnhandledError Text
 _parseScalarExpression expr = case expr of
-    Star                       -> Right "col(\"*\")"
-    App functionNames subExprs -> parseAppExpression functionNames subExprs
-    Cast subExpr typeName -> do
+    Star                        -> Right "col(\"*\")"
+    App  functionNames subExprs -> parseAppExpression functionNames subExprs
+    Cast subExpr       typeName -> do
         parsedSubExpr <- parseScalarExpressionToCol subExpr
-        parsedType <- sparkType typeName
-        pure $ parsedSubExpr
-            <> ".cast("
-            <> parsedType
-            <> ")"
+        parsedType    <- sparkType typeName
+        pure $ parsedSubExpr <> ".cast(" <> parsedType <> ")"
     Case  test     whens     elsePart -> parseCaseExpression test whens elsePart
     BinOp subExpr1 funcNames subExpr2 -> parseBinOp subExpr1 funcNames subExpr2
-    PostfixOp functionNames subExpr ->
-        parseScalarExpressionToCol subExpr <> parseFunctionNames functionNames
+    PostfixOp functionNames subExpr   -> parseScalarExpressionToCol subExpr
+        <> parseFunctionNames functionNames
     SpecialOp functionNames subExprs -> handleSpecialOp functionNames subExprs
     PrefixOp functionNames subExpr ->
         parseFunctionNames functionNames <> parseScalarExpressionToCol subExpr
-    Parens subExpr       -> (\x -> "(" <> x <> ")") <$> parseScalarExpressionToCol subExpr
+    Parens subExpr ->
+        (\x -> "(" <> x <> ")") <$> parseScalarExpressionToCol subExpr
     HostParameter name _ -> Right $ T.pack name
     In inOrNotIn subExpr predValue ->
         parseInExpression inOrNotIn subExpr predValue
@@ -356,7 +412,8 @@ _parseScalarExpression expr = case expr of
     unparsed -> parseError "Can't parse expression in query block" unparsed
 
 parseSortSpecs :: [SortSpec] -> Either UnhandledError Text
-parseSortSpecs sortSpecs = T.intercalate "," <$> traverse parseSortSpec sortSpecs
+parseSortSpecs sortSpecs =
+    T.intercalate "," <$> traverse parseSortSpec sortSpecs
 
 parseSortSpec :: SortSpec -> Either UnhandledError Text
 parseSortSpec (SortSpec expr direction nullsOrder) =
@@ -387,21 +444,23 @@ parseWindowFunction
     -> Maybe Frame
     -> Either UnhandledError Text
 parseWindowFunction names _ partition orderBy _ = do
-    parsedName <- parseNamesInsideIden names
+    parsedName      <- parseNamesInsideIden names
     parsedPartition <- parseScalarExpressionsGeneral partition
-    parsedOrderBy <- parseSortSpecs orderBy
-    pure $ parsedName
+    parsedOrderBy   <- parseSortSpecs orderBy
+    pure
+        $  parsedName
         <> "().over(Window.partitionBy("
         <> parsedPartition
         <> ").orderBy("
         <> parsedOrderBy
         <> ")"
 
-parseInExpression :: Bool -> ScalarExpr -> InPredValue -> Either UnhandledError Text
+parseInExpression
+    :: Bool -> ScalarExpr -> InPredValue -> Either UnhandledError Text
 parseInExpression inOrNotIn expr predValue = do
-        parsedExpression <- parseScalarExpressionToCol expr
-        parsedPredicate <- parseInPredicate predValue
-        pure $ prefix <> parsedExpression <> ".isin(" <> parsedPredicate <> ")"
+    parsedExpression <- parseScalarExpressionToCol expr
+    parsedPredicate  <- parseInPredicate predValue
+    pure $ prefix <> parsedExpression <> ".isin(" <> parsedPredicate <> ")"
     where prefix = if inOrNotIn then "" else "!"
 
 parseInPredicate :: InPredValue -> Either UnhandledError Text
@@ -410,21 +469,23 @@ parseInPredicate predValue = case predValue of
     InQueryExpr expr -> printQueryExpression expr
 
 parseBinOp :: ScalarExpr -> [Name] -> ScalarExpr -> Either UnhandledError Text
-parseBinOp subExpr1 funcNames subExpr2 =
-    do
-        functionName <- parseFunctionNames funcNames
-        parsedExpr1 <- parseScalarExpressionToCol subExpr1
-        parsedExpr2 <- parseScalarExpressionToAny subExpr2
-        case functionName of
-            "not like" -> pure $ "!" <> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
-            "like"     -> pure $ parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
-            -- This is where the AST gets fucked up, thinks a schema dot separator is a function
-            "."        -> handleSpecialCaseForDotSeperator subExpr1 subExpr2
-            _ -> pure $ parsedExpr1 <> " " <> functionName <> " " <> parsedExpr2
+parseBinOp subExpr1 funcNames subExpr2 = do
+    functionName <- parseFunctionNames funcNames
+    parsedExpr1  <- parseScalarExpressionToCol subExpr1
+    parsedExpr2  <- parseScalarExpressionToAny subExpr2
+    case functionName of
+        "not like" ->
+            pure $ "!" <> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
+        "like" -> pure $ parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
+        -- This is where the AST gets fucked up, thinks a schema dot separator is a function
+        "." -> handleSpecialCaseForDotSeperator subExpr1 subExpr2
+        _ -> pure $ parsedExpr1 <> " " <> functionName <> " " <> parsedExpr2
 
-handleSpecialCaseForDotSeperator :: ScalarExpr -> ScalarExpr -> Either UnhandledError Text
-handleSpecialCaseForDotSeperator expr1 expr2 =
-    fmap (\x -> "col(\"" <> x <> "\")") parsedTableAndColumn
+handleSpecialCaseForDotSeperator
+    :: ScalarExpr -> ScalarExpr -> Either UnhandledError Text
+handleSpecialCaseForDotSeperator expr1 expr2 = fmap
+    (\x -> "col(\"" <> x <> "\")")
+    parsedTableAndColumn
   where
     parsedTableAndColumn = case (expr1, expr2) of
         (Iden name1, Iden name2) -> do
@@ -432,11 +493,12 @@ handleSpecialCaseForDotSeperator expr1 expr2 =
             parsedName2 <- parseNamesInsideIden name2
             pure $ parsedName1 <> "." <> parsedName2
         (Iden name1, Star) -> (<> ".*") <$> parseNamesInsideIden name1
-        other                  -> parseError "parseDotSeparatorCase error" other
+        other              -> parseError "parseDotSeparatorCase error" other
 
 
 parseError :: Show a => Text -> a -> Either UnhandledError Text
-parseError errorMessage expr = Left $ UnhandledError errorMessage (T.pack (ppShow expr))
+parseError errorMessage expr =
+    Left $ UnhandledError errorMessage (T.pack (ppShow expr))
 
 parseIdenToCol :: [Name] -> Either UnhandledError Text
 parseIdenToCol names = do
@@ -444,7 +506,7 @@ parseIdenToCol names = do
     case parsedName of
         "TRUE"  -> pure "lit(true)"
         "FALSE" -> pure "lit(false)"
-        "NULL" -> pure "lit(null)"
+        "NULL"  -> pure "lit(null)"
         other   -> pure $ "col(\"" <> other <> "\")"
 
 parseIdenToAny :: [Name] -> Either UnhandledError Text
@@ -453,7 +515,7 @@ parseIdenToAny names = do
     case parsedName of
         "TRUE"  -> pure "true"
         "FALSE" -> pure "false"
-        "NULL" -> pure "null"
+        "NULL"  -> pure "null"
         other   -> pure $ "col(\"" <> other <> "\")"
 
 parseIdenNoCol :: [Name] -> Either UnhandledError Text
@@ -462,7 +524,7 @@ parseIdenNoCol names = do
     case parsedName of
         "TRUE"  -> pure "true"
         "FALSE" -> pure "false"
-        "NULL" -> pure "null"
+        "NULL"  -> pure "null"
         other   -> pure other
 
 
@@ -470,25 +532,25 @@ parseAppExpression :: [Name] -> [ScalarExpr] -> Either UnhandledError Text
 parseAppExpression functionNames subExpr = do
     functionName <- parseFunctionNames functionNames
     case functionName of
-        "coalesce" ->
-            (\x -> "coalesce(" <> x <> ")") <$> parseScalarExpressionsSecArgCol subExpr
-        "greatest" ->
-            (\x -> "greatest(" <> x <> ")") <$> parseScalarExpressionsSecArgCol subExpr
-        "least" ->
-            (\x -> "least(" <> x <> ")") <$> parseScalarExpressionsSecArgCol subExpr
+        "coalesce" -> (\x -> "coalesce(" <> x <> ")")
+            <$> parseScalarExpressionsSecArgCol subExpr
+        "greatest" -> (\x -> "greatest(" <> x <> ")")
+            <$> parseScalarExpressionsSecArgCol subExpr
+        "least" -> (\x -> "least(" <> x <> ")")
+            <$> parseScalarExpressionsSecArgCol subExpr
         "date_part" -> parseDatePart subExpr
-        _ -> (\x -> functionName <> "(" <> x <> ")") <$> parseScalarExpressionsGeneral subExpr
+        _           -> (\x -> functionName <> "(" <> x <> ")")
+            <$> parseScalarExpressionsGeneral subExpr
 
 parseDatePart :: [ScalarExpr] -> Either UnhandledError Text
-parseDatePart [expr1, expr2] =
-    do
-        firstExpr <- parseScalarExpressionNoCol expr1
-        secondExpr <- parseScalarExpressionToCol expr2
-        case firstExpr of
-            "\"month\"" -> return $ "month(" <> secondExpr <> ")"
-            "\"day\"" -> return $ "day(" <> secondExpr <> ")"
-            "\"year\"" -> return $ "year(" <> secondExpr <> ")"
-            _ -> parseError "Unrecongised date part " firstExpr
+parseDatePart [expr1, expr2] = do
+    firstExpr  <- parseScalarExpressionNoCol expr1
+    secondExpr <- parseScalarExpressionToCol expr2
+    case firstExpr of
+        "\"month\"" -> return $ "month(" <> secondExpr <> ")"
+        "\"day\""   -> return $ "day(" <> secondExpr <> ")"
+        "\"year\""  -> return $ "year(" <> secondExpr <> ")"
+        _           -> parseError "Unrecongised date part " firstExpr
 parseDatePart other = parseError "parseError" other
 
 -- Currently used to handle between
@@ -504,7 +566,8 @@ handleBetween exprs = case exprs of
         parsedExpr1 <- parseScalarExpressionToCol expr1
         parsedExpr2 <- parseScalarExpressionToAny expr2
         parsedExpr3 <- parseScalarExpressionToAny expr3
-        return $ parsedExpr1
+        return
+            $  parsedExpr1
             <> ".between("
             <> parsedExpr2
             <> ", "
@@ -517,10 +580,10 @@ parseFunctionNames :: [Name] -> Either UnhandledError Text
 parseFunctionNames names = case names of
     [name]             -> parseFunctionName name
     [schemaName, name] -> do
-        parsedSchemaName <- parseName schemaName
+        parsedSchemaName   <- parseName schemaName
         parsedFunctionName <- parseFunctionName name
         return $ parsedSchemaName <> "." <> parsedFunctionName
-    other              -> parseError "Couldn't parse function name" other
+    other -> parseError "Couldn't parse function name" other
 
 parseFunctionName :: Name -> Either UnhandledError Text
 parseFunctionName name = case name of
@@ -536,7 +599,10 @@ parseNamesInUsingClause names = do
 parseNamesInsideIden :: [Name] -> Either UnhandledError Text
 parseNamesInsideIden names = case names of
     [name]             -> parseName name
-    [schemaName, name] -> parseName schemaName <> Right "." <> parseName name
+    [schemaName, name] -> do
+        parsedSchemaName <- parseName schemaName
+        parsedName <- parseName name
+        pure $ parsedSchemaName <> "." <> parsedName
     other              -> parseError "Couldn't parse name" other
 
 parseName :: Name -> Either UnhandledError Text
@@ -551,9 +617,10 @@ parseCaseExpression
     -> Either UnhandledError Text
 parseCaseExpression _ whens elsePart = do
     parsedWhens <- traverse parseWhen whens
-    parsedElse <- case elsePart of
-        Nothing -> Right ""
-        Just expr -> (\x -> ".otherwise(" <> x <> ")") <$> parseScalarExpressionToAny expr
+    parsedElse  <- case elsePart of
+        Nothing   -> Right ""
+        Just expr -> (\x -> ".otherwise(" <> x <> ")")
+            <$> parseScalarExpressionToAny expr
     return $ T.intercalate "." parsedWhens <> parsedElse
   where
     parseWhen (condExprs, thenExpr) = do
