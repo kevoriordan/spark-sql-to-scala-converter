@@ -65,61 +65,9 @@ data UnhandledError = UnhandledError
 run :: IO ()
 run =
     let parsedSql = parseSql [r|
-    select A.member_id,
-    A.start_month, A.end_month, A.start_trail12, A.end_trail12, 
-    A.start_year, A.end_year, A.begin_start_year, A.begin_end_year, A.end_start_year, A.start_year_months, A.end_year_months,
-   A.sal_private_exbonus_end_year_trail12,
-   A.sal_private_exbonus_begin_year_trail12,
-   A.sal_private_exbonus_begin_year_whole,
-   A.sal_private_end_year,
-   A.sal_private_begin_year_trail12,
-   A.sal_private_begin_year_whole,
-   nvl(A.sal_private_begin_year_whole,0) - nvl(A.sal_private_begin_year_trail12,0) as sal_private_begin_year_pre_trail12,
-   CASE WHEN A.end_start_year IS NOT NULL
-       THEN Tbeg.fedicare_salt_tax_low + Tbeg.fedicare_salt_tax_slope*(A.sal_private_exbonus_begin_year_whole - Tbeg.net_pay_low)
-   ELSE 0.00  END as subTAX_sal_private_exbonus_begin_year_whole,
-   
-   
-   
-   CASE WHEN A.end_start_year IS NOT NULL  and nvl(A.sal_private_exbonus_begin_year_whole,0)>0 
-       THEN Tbeg.fedicare_salt_tax_low*(A.sal_private_exbonus_begin_year_trail12/A.sal_private_exbonus_begin_year_whole) 
-       + Tbeg.fedicare_salt_tax_slope*(A.sal_private_exbonus_begin_year_trail12 - Tbeg.net_pay_low*((A.sal_private_exbonus_begin_year_trail12/A.sal_private_exbonus_begin_year_whole)))
-   ELSE 0.00  END as subTAX_sal_private_exbonus_begin_year_trail12,
-   
-   
-   
-   CASE 
-           WHEN  month(start_month)=1
-           THEN Tend.fedicare_salt_tax_low + Tend.fedicare_salt_tax_slope*(A.sal_private_exbonus_end_year_trail12 - Tend.net_pay_low)
-           WHEN  (month(start_month) between 2 and 6) and nvl(A.sal_private_exbonus_end_year_trail12,0)+nvl(A.sal_private_exbonus_begin_year_trail12,0)>0
-           THEN Tend.fedicare_salt_tax_low*(A.sal_private_exbonus_end_year_trail12/(A.sal_private_exbonus_end_year_trail12+A.sal_private_exbonus_begin_year_trail12))
-                       + Tend.fedicare_salt_tax_slope*(A.sal_private_exbonus_end_year_trail12 - Tend.net_pay_low*(A.sal_private_exbonus_end_year_trail12/(A.sal_private_exbonus_end_year_trail12+A.sal_private_exbonus_begin_year_trail12)))
-           WHEN  month(start_month)>6
-           THEN Tend.fedicare_salt_tax_low*((end_year_months*1.0)/12) + Tend.fedicare_salt_tax_slope*(A.sal_private_exbonus_end_year_trail12 - Tend.net_pay_low*((end_year_months*1.0)/12) )
-   ELSE 0.00 END as subTAX_sal_private_exbonus_end_year --,
-   from cs_spend_payr_cal3 A 
-   LEFT JOIN tax_lookup_table_range Tbeg 
-   ON nvl(A.tax_city_start_year,'XX')=nvl(Tbeg.tax_city,'XX') AND nvl(A.tax_state_start_year,'XX')=nvl(Tbeg.tax_state,'XX') 
-   AND A.start_year=Tbeg.tax_year 
-   -- can't do between because will double count if on the line. 
-   AND A.sal_private_exbonus_begin_year_whole>=  Tbeg.net_pay_low
-   AND LEAST(100000000 - 0.01, A.sal_private_exbonus_begin_year_whole)<  Tbeg.net_pay_high
-   
-   LEFT JOIN tax_lookup_table_range Tend 
-   ON nvl(A.tax_city_end_year,'XX')=nvl(Tend.tax_city,'XX') AND nvl(A.tax_state_end_year,'XX')=nvl(Tend.tax_state,'XX') 
-   AND A.end_year=Tend.tax_year 
-   -- can't do between because will double count if on the line.
-   -- must gross up private end_year.  If <6 months of year use TRAILING 12 for bracket, if 6 or more use (12/num months)*end_trail12 amount
-   AND CASE WHEN month(start_month)=1 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)
-           When month(start_month) between 2 and 6 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)+nvl(A.sal_private_exbonus_begin_year_trail12,0)
-           ELSE nvl(A.sal_private_exbonus_end_year_trail12,0)*(12/(end_year_months*1.0)) END 
-                                   >=  Tend.net_pay_low
-   AND LEAST(100000000 - 0.01, CASE WHEN month(start_month)=1 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)
-           When month(start_month) between 2 and 6 THEN nvl(A.sal_private_exbonus_end_year_trail12,0)+nvl(A.sal_private_exbonus_begin_year_trail12,0)
-           ELSE nvl(A.sal_private_exbonus_end_year_trail12,0)*(12/(end_year_months*1.0)) END )
-                                   < 	 Tend.net_pay_high
-                                   |]
-    in  case parsedSql of
+    select a, b from blah
+|]
+       in  case parsedSql of
             Right parsed -> putStrLn $ T.unpack parsed
             Left  err    -> print err
 
@@ -397,11 +345,15 @@ _parseScalarExpression expr = case expr of
         pure $ parsedSubExpr <> ".cast(" <> parsedType <> ")"
     Case  test     whens     elsePart -> parseCaseExpression test whens elsePart
     BinOp subExpr1 funcNames subExpr2 -> parseBinOp subExpr1 funcNames subExpr2
-    PostfixOp functionNames subExpr   -> parseScalarExpressionToCol subExpr
-        <> parseFunctionNames functionNames
+    PostfixOp functionNames subExpr   -> do
+        parsedSubExpr <- parseScalarExpressionToCol subExpr
+        parsedFunctionNames <- parseFunctionNames functionNames
+        pure $ parsedSubExpr <> parsedFunctionNames
     SpecialOp functionNames subExprs -> handleSpecialOp functionNames subExprs
-    PrefixOp functionNames subExpr ->
-        parseFunctionNames functionNames <> parseScalarExpressionToCol subExpr
+    PrefixOp functionNames subExpr -> do
+        parsedFunctionNames <- parseFunctionNames functionNames
+        parsedSubExpr <- parseScalarExpressionToCol subExpr
+        pure $ parsedFunctionNames <> parsedSubExpr
     Parens subExpr ->
         (\x -> "(" <> x <> ")") <$> parseScalarExpressionToCol subExpr
     HostParameter name _ -> Right $ T.pack name
@@ -444,7 +396,7 @@ parseWindowFunction
     -> Maybe Frame
     -> Either UnhandledError Text
 parseWindowFunction names _ partition orderBy _ = do
-    parsedName      <- parseNamesInsideIden names
+    parsedName      <- T.toLower <$> parseNamesInsideIden names
     parsedPartition <- parseScalarExpressionsGeneral partition
     parsedOrderBy   <- parseSortSpecs orderBy
     pure
@@ -453,7 +405,7 @@ parseWindowFunction names _ partition orderBy _ = do
         <> parsedPartition
         <> ").orderBy("
         <> parsedOrderBy
-        <> ")"
+        <> "))"
 
 parseInExpression
     :: Bool -> ScalarExpr -> InPredValue -> Either UnhandledError Text
@@ -539,8 +491,25 @@ parseAppExpression functionNames subExpr = do
         "least" -> (\x -> "least(" <> x <> ")")
             <$> parseScalarExpressionsSecArgCol subExpr
         "date_part" -> parseDatePart subExpr
+        "dateadd" -> parseDateAdd subExpr
         _           -> (\x -> functionName <> "(" <> x <> ")")
             <$> parseScalarExpressionsGeneral subExpr
+
+parseDateAdd :: [ScalarExpr] -> Either UnhandledError Text
+--parseDateAdd [expr1, expr2, expr3] = do
+--    secondExpr <- parseScalarExpressionToAny expr2
+--    if T.isInfixOf "col(" secondExpr then
+--        pure $ parseDateAddAsExpr expr1 expr2 expr3
+--    else
+--        pure $ parseDateAddAsScala expr1 expr2 expr3
+parseDateAdd other = parseError "dateadd expression not handled" other
+
+parseDateAddAsExpr :: ScalarExpr -> ScalarExpr -> ScalarExpr -> Text
+parseDateAddAsExpr expr1 expr2 expr3 = ""
+
+parseDateAddAsScala :: ScalarExpr -> ScalarExpr -> ScalarExpr -> Text
+parseDateAddAsScala expr1 expr2 expr3 = ""
+
 
 parseDatePart :: [ScalarExpr] -> Either UnhandledError Text
 parseDatePart [expr1, expr2] = do
@@ -593,7 +562,7 @@ parseFunctionName name = case name of
 parseNamesInUsingClause :: [Name] -> Either UnhandledError Text
 parseNamesInUsingClause names = do
     parsedNames <- traverse parseName names
-    let mappedNames = map (\x -> "(" <> x <> "\"") parsedNames
+    let mappedNames = map (\x -> "\"" <> x <> "\"") parsedNames
     pure $ T.intercalate "," mappedNames
 
 parseNamesInsideIden :: [Name] -> Either UnhandledError Text
@@ -646,6 +615,8 @@ sparkFunction function = case T.toLower function of
 sparkType :: TypeName -> Either UnhandledError Text
 sparkType typeName = case typeName of
     TypeName [Name Nothing "int8"] -> Right "DataTypes.LongType"
+    TypeName [Name Nothing "date"] -> Right "DataTypes.DateType"
+    TypeName [Name Nothing "integer"] -> Right "DataTypes.IntegerType"
     TypeName [name               ] -> parseError "Couldn't parse type" name
     PrecTypeName [Name Nothing "varchar"] _ -> Right "DataTypes.StringType"
     blah                           -> parseError "Couldn't parse type" blah
