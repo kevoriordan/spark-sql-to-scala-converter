@@ -9,6 +9,7 @@ module Run
     )
 where
 
+import           Data.Either
 import           Text.RawString.QQ
 
 import           Text.Show.Pretty               ( ppShow )
@@ -55,51 +56,66 @@ import           Language.SQL.SimpleSQL.Syntax  ( Statement
                                                 )
 import           Language.SQL.SimpleSQL.Dialect ( postgres )
 
+data UnhandledError = UnhandledError
+                        {
+                            uhErrorString :: Text,
+                            uhOriginalPP :: Text
+                        } deriving (Show)
 
 run :: IO ()
-run = putStrLn $ T.unpack $ parseSql [r|
+run = let parsedSql = parseSql [r|
 select A.* from A cross join B order by b desc nulls last
-|]
+|] in
+    case parsedSql of
+        Right parsed -> putStrLn $ T.unpack parsed
+        Left err -> print err
 
 
-parseSql :: String -> Text
+parseSql :: String -> Either UnhandledError Text
 parseSql src = do
     let parsed :: Either ParseError [Statement]
         parsed = parseStatements postgres "" Nothing src
     either (error . peFormattedError) parseStmts parsed
 
-parseStmts :: [Statement] -> Text
-parseStmts statements = T.intercalate "\n" $ map parseStatement statements
+parseStmts :: [Statement] -> Either UnhandledError Text
+parseStmts statements = do
+    parsedStatements <- traverse parseStatement statements
+    pure $ T.intercalate "\n" parsedStatements
 
-parseStatement :: Statement -> Text
+parseStatement :: Statement -> Either UnhandledError Text
 parseStatement statement = case statement of
     SelectStatement queryExpression -> printQueryExpression queryExpression
     Insert names _ insertSource     -> parseInsertStatement names insertSource
-    DropTable   _ _                 -> ""
-    CreateTable _ _                 -> ""
-    blah                            -> T.pack (ppShow blah)
+    DropTable   _ _                 -> Right ""
+    CreateTable _ _                 -> Right ""
+    blah                            -> parseError "Can't parse top level statement" blah
 
-parseWithBlocks :: [Name] -> [(Alias, QueryExpr)] -> QueryExpr -> Text
-parseWithBlocks insertIntoNames views queryExpression =
-    T.intercalate "\n" (map parseWithBlock views)
+parseWithBlocks :: [Name] -> [(Alias, QueryExpr)] -> QueryExpr -> Either UnhandledError Text
+parseWithBlocks insertIntoNames views queryExpression = do
+    parsedViews <- traverse parseWithBlock views
+    parsedInsertQuery <- printInsertQueryExpression insertIntoNames queryExpression
+    pure $ T.intercalate "\n" parsedViews
         <> "\n"
-        <> printInsertQueryExpression insertIntoNames queryExpression
+        <> parsedInsertQuery
 
-parseWithBlock :: (Alias, QueryExpr) -> Text
+parseWithBlock :: (Alias, QueryExpr) -> Either UnhandledError Text
 parseWithBlock (alias, queryExpr) =
-    "val " <> parseTableAlias alias <> " = " <> printQueryExpression queryExpr
+    do
+        parsedAlias <- parseTableAlias alias
+        parsedQueryExpr <- printQueryExpression queryExpr
+        pure $ "val " <> parsedAlias <> " = " <> parsedQueryExpr
 
-parseTableAlias :: Alias -> Text
+parseTableAlias :: Alias -> Either UnhandledError Text
 parseTableAlias alias = case alias of
     Alias name Nothing -> parseName name
-    other              -> T.pack $ ppShow other
+    other              -> Left $ UnhandledError "Can't parse table alias" (T.pack $ ppShow other)
 
 
-parseInsertStatement :: [Name] -> InsertSource -> Text
+parseInsertStatement :: [Name] -> InsertSource -> Either UnhandledError Text
 parseInsertStatement insertIntoNames insertSource = case insertSource of
     InsertQuery queryExpr ->
         printInsertQueryExpression insertIntoNames queryExpr
-    blah -> T.pack (ppShow blah)
+    blah -> Left $ UnhandledError "Can't handle insert source " (T.pack (ppShow blah))
 
 
 scalaFormatTableName :: Text -> Text
@@ -110,26 +126,29 @@ scalaFormatTableName = T.map
     )
 
 
-printInsertQueryExpression :: [Name] -> QueryExpr -> Text
+printInsertQueryExpression :: [Name] -> QueryExpr -> Either UnhandledError Text
 printInsertQueryExpression insertIntoNames expression = case expression of
     Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
-        -> "val "
-            <> parseNamesInsideIden insertIntoNames
-            <> " = "
-            <> printSelectStatement setQuantifier
-                                    selectList
-                                    from
-                                    sWhere
-                                    groupBy
-                                    having
-                                    orderBy
-                                    offset
-                                    fetchFirst
+        -> do
+            parsedNames <- parseNamesInsideIden insertIntoNames
+            parsedSelect <- printSelectStatement setQuantifier
+                selectList
+                from
+                sWhere
+                groupBy
+                having
+                orderBy
+                offset
+                fetchFirst
+            pure $ "val "
+                <> parsedNames
+                <> " = "
+                <> parsedSelect
     With _ views queryExpression ->
         parseWithBlocks insertIntoNames views queryExpression
-    other -> T.pack $ ppShow other
+    other -> parseError "can't parse insert query" other
 
-printQueryExpression :: QueryExpr -> Text
+printQueryExpression :: QueryExpr -> Either UnhandledError Text
 printQueryExpression expression = case expression of
     Select setQuantifier selectList from sWhere groupBy having orderBy offset fetchFirst
         -> printSelectStatement setQuantifier
@@ -141,7 +160,7 @@ printQueryExpression expression = case expression of
                                 orderBy
                                 offset
                                 fetchFirst
-    other -> T.pack $ ppShow other
+    other -> parseError "can't parse query expression" other
 
 printSelectStatement
     :: SetQuantifier
@@ -153,41 +172,29 @@ printSelectStatement
     -> [SortSpec]
     -> Maybe ScalarExpr
     -> Maybe ScalarExpr
-    -> Text
+    -> Either UnhandledError Text
 printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy _ _
-    = let fromClause = parseFromClause from
-      in
-          let
-              whereClause = case sWhere of
-                  Nothing -> ""
-                  Just expr ->
-                      "\n  .filter(" <> parseScalarExpressionToAny expr <> ")"
-          in
-              let groupByClause = parseGroupingExpressions groupBy
-              in
-                  let selectClause = parseSelectClause groupByClause selectList
-                  in
-                      let
-                          havingClause = case having of
-                              Nothing -> ""
-                              Just expr ->
-                                  "\n  .filter("
-                                      <> parseScalarExpressionToAny expr
-                                      <> ")"
-                      in
-                          let sqClause = case setQuantifier of
-                                  SQDefault -> ""
-                                  All       -> ""
-                                  Distinct  -> "\n  .distinct()"
-                          in
-                              let
-                                  orderByClause = case orderBy of
-                                      [] -> ""
-                                      _ ->
-                                          "\n  .orderBy("
-                                              <> parseSortSpecs orderBy
-                                              <> ")"
-                              in  fromClause
+    = do
+        fromClause <- parseFromClause from
+        whereClause <- case sWhere of
+            Nothing -> Right ""
+            Just expr -> (\x -> "\n  .filter(" <> x <> ")") <$> parseScalarExpressionToAny expr
+        groupByClause <- parseGroupingExpressions groupBy
+        selectClause <- parseSelectClause groupByClause selectList
+        havingClause <- case having of
+            Nothing -> Right ""
+            Just expr -> (\x -> "\n  .filter(" <> x <> ")") <$> parseScalarExpressionToAny expr
+        let sqClause = case setQuantifier of
+                            SQDefault -> ""
+                            All       -> ""
+                            Distinct  -> "\n  .distinct()"
+        orderByClause <- case orderBy of
+            [] -> Right ""
+            _ -> (\x ->
+                "\n  .orderBy("
+                    <> x
+                    <> ")") <$> parseSortSpecs orderBy
+        pure $  fromClause
                                   <> whereClause
                                   <> groupByClause
                                   <> selectClause
@@ -195,31 +202,40 @@ printSelectStatement setQuantifier selectList from sWhere groupBy having orderBy
                                   <> havingClause
                                   <> sqClause
 
-parseFromClause :: [TableRef] -> Text
+parseFromClause :: [TableRef] -> Either UnhandledError Text
 parseFromClause tableRefs = case tableRefs of
-    []            -> "empty FROM not supported"
-    tableRef : xs -> parseTableRef tableRef
-        <> T.concat (map (\x -> "\n  .join(" <> parseTableRef x <> ")") xs)
+    []            -> parseError "empty FROM not supported" ""
+    tableRef : xs -> do
+        parsedHead <- parseTableRef tableRef
+        parsedTail1 <- traverse parseTableRef xs
+        let parsedTail2 = fmap (\x -> "\n  .join(" <> x <> ")") parsedTail1
+        pure $ parsedHead <> T.concat parsedTail2
 
-parseTableRef :: TableRef -> Text
+parseTableRef :: TableRef -> Either UnhandledError Text
 parseTableRef tableRef = case tableRef of
     TRJoin tableA isNatural joinType tableB maybeJoinCondition ->
         parseTableJoin tableA isNatural joinType tableB maybeJoinCondition
-    TRSimple name -> scalaFormatTableName $ parseNamesInsideIden name
-    TRAlias subRef alias ->
-        parseTableRef subRef <> ".as(\"" <> parseAlias alias <> "\")"
-    blah -> T.pack $ ppShow blah
+    TRSimple name -> scalaFormatTableName <$> parseNamesInsideIden name
+    TRAlias subRef alias -> do
+        parsedSubRef <- parseTableRef subRef
+        parsedAlias <- parseAlias alias
+        pure $ parsedSubRef <> ".as(\"" <> parsedAlias <> "\")"
+    blah -> parseError "can't parse table ref" blah
 
 parseTableJoin
-    :: TableRef -> Bool -> JoinType -> TableRef -> Maybe JoinCondition -> Text
-parseTableJoin tableA _ joinType tableB maybeJoinCondition =
-    parseTableRef tableA
+    :: TableRef -> Bool -> JoinType -> TableRef -> Maybe JoinCondition -> Either UnhandledError Text
+parseTableJoin tableA _ joinType tableB maybeJoinCondition = do
+    parsedTableRefA <- parseTableRef tableA
+    parsedTableRefB <- parseTableRef tableB
+    parsedJoinCondition <- parseJoinCondition maybeJoinCondition
+    let parsedJoinType = parseJoinType joinType
+    pure $ parsedTableRefA
         <> "\n  ."
         <> joinKeyword
         <> "("
-        <> parseTableRef tableB
-        <> parseJoinCondition maybeJoinCondition
-        <> parseJoinType joinType
+        <> parsedTableRefB
+        <> parsedJoinCondition
+        <> parsedJoinType
         <> ")"
   where
     joinKeyword = case joinType of
@@ -234,25 +250,25 @@ parseJoinType joinType = case joinType of
     JFull  -> ", \"outer\""
     JCross -> ""  -- the cross join condition is handled with .crossJoin instead of .join in Spark
 
-parseJoinCondition :: Maybe JoinCondition -> Text
-parseJoinCondition Nothing              = ""
+parseJoinCondition :: Maybe JoinCondition -> Either UnhandledError Text
+parseJoinCondition Nothing              = Right ""
 parseJoinCondition (Just joinCondition) = case joinCondition of
-    JoinOn    expr  -> ", " <> parseScalarExpressionToAny expr
-    JoinUsing names -> ", Seq(" <> parseNamesInUsingClause names <> ")"
+    JoinOn    expr  -> (", " <>) <$> parseScalarExpressionToAny expr
+    JoinUsing names -> (\x -> ", Seq(" <> x <> ")") <$> parseNamesInUsingClause names
 
-parseAlias :: Alias -> Text
+parseAlias :: Alias -> Either UnhandledError Text
 parseAlias (Alias name _) = parseName name
 
-parseSelectClause :: Text -> [(ScalarExpr, Maybe Name)] -> Text
+parseSelectClause :: Text -> [(ScalarExpr, Maybe Name)] -> Either UnhandledError Text
 parseSelectClause groupByClause selectList = case groupByClause of
-    "" ->
+    "" -> (\x ->
         "\n  .select("
-            <> T.intercalate ", " (map parseSelectList selectList)
-            <> ")"
-    _ ->
+            <> T.intercalate ", " x
+            <> ")") <$> traverse parseSelectList selectList
+    _ -> (\x ->
         "\n  .agg("
-            <> T.intercalate "," (map parseSelectList (filter isAgg selectList))
-            <> ")"
+            <> T.intercalate "," x
+            <> ")") <$> traverse parseSelectList (filter isAgg selectList)
 
 isAgg :: (ScalarExpr, Maybe Name) -> Bool
 isAgg (expr, _) = case expr of
@@ -260,67 +276,69 @@ isAgg (expr, _) = case expr of
     _       -> False
 
 
-parseGroupingExpressions :: [GroupingExpr] -> Text
+parseGroupingExpressions :: [GroupingExpr] -> Either UnhandledError Text
 parseGroupingExpressions groupingExpressions = case groupingExpressions of
-    [] -> ""
-    other ->
+    [] -> Right ""
+    other -> (\x ->
         "\n  .groupBy("
-            <> T.intercalate "," (map parseGroupingExpression other)
-            <> ")"
+            <> T.intercalate "," x
+            <> ")") <$> traverse parseGroupingExpression other
 
-parseGroupingExpression :: GroupingExpr -> Text
+parseGroupingExpression :: GroupingExpr -> Either UnhandledError Text
 parseGroupingExpression groupingExpr = case groupingExpr of
     SimpleGroup scalarExpr -> parseScalarExpressionToCol scalarExpr
-    other                  -> T.pack $ ppShow other
+    other                  -> Left $ UnhandledError "parseGroupingExpr err" (T.pack $ ppShow other)
 
-parseSelectList :: (ScalarExpr, Maybe Name) -> Text
+parseSelectList :: (ScalarExpr, Maybe Name) -> Either UnhandledError Text
 parseSelectList (expr, alias) =
     parseScalarExpressionToCol expr <> case alias of
-        Just name -> ".as(\"" <> parseNamesInsideIden [name] <> "\")"
-        Nothing   -> ""
+        Just name -> (\x -> ".as(\"" <> x <> "\")") <$> parseNamesInsideIden [name]
+        Nothing   -> Right ""
 
 
-parseScalarExpressionsGeneral :: [ScalarExpr] -> Text
+parseScalarExpressionsGeneral :: [ScalarExpr] -> Either UnhandledError Text
 parseScalarExpressionsGeneral exprs =
-    T.intercalate ", " (map parseScalarExpressionToAny exprs)
+    T.intercalate ", " <$> traverse parseScalarExpressionToAny exprs
 
 
-parseScalarExpressionsSecArgCol :: [ScalarExpr] -> Text
+parseScalarExpressionsSecArgCol :: [ScalarExpr] -> Either UnhandledError Text
 parseScalarExpressionsSecArgCol exprs =
-    T.intercalate ", " (map parseScalarExpressionToCol exprs)
+    T.intercalate ", " <$> traverse parseScalarExpressionToCol exprs
 
 
-parseScalarExpressionToCol :: ScalarExpr -> Text
+parseScalarExpressionToCol :: ScalarExpr -> Either UnhandledError Text
 parseScalarExpressionToCol expr = case expr of
-    NumLit lit        -> "lit(" <> T.pack lit <> ")"
-    StringLit _ _ lit -> "lit(\"" <> T.pack lit <> "\")"
+    NumLit lit        -> Right $ "lit(" <> T.pack lit <> ")"
+    StringLit _ _ lit -> Right $ "lit(\"" <> T.pack lit <> "\")"
     Iden name         -> parseIdenToCol name
     other             -> _parseScalarExpression other
 
 
-parseScalarExpressionToAny :: ScalarExpr -> Text
+parseScalarExpressionToAny :: ScalarExpr -> Either UnhandledError Text
 parseScalarExpressionToAny expr = case expr of
-    NumLit lit        -> T.pack lit
-    StringLit _ _ lit -> "\"" <> T.pack lit <> "\""
+    NumLit lit        -> Right $ T.pack lit
+    StringLit _ _ lit -> Right $ "\"" <> T.pack lit <> "\""
     Iden name         -> parseIdenToAny name
     other             -> _parseScalarExpression other
 
 
-parseScalarExpressionNoCol :: ScalarExpr -> Text
+parseScalarExpressionNoCol :: ScalarExpr -> Either UnhandledError Text
 parseScalarExpressionNoCol expr = case expr of
-    NumLit lit        -> T.pack lit
-    StringLit _ _ lit -> "\"" <> T.pack lit <> "\""
+    NumLit lit        -> Right $ T.pack lit
+    StringLit _ _ lit -> Right $ "\"" <> T.pack lit <> "\""
     Iden name         -> parseIdenNoCol name
     other             -> _parseScalarExpression other
 
-_parseScalarExpression :: ScalarExpr -> Text
+_parseScalarExpression :: ScalarExpr -> Either UnhandledError Text
 _parseScalarExpression expr = case expr of
-    Star                       -> "col(\"*\")"
+    Star                       -> Right "col(\"*\")"
     App functionNames subExprs -> parseAppExpression functionNames subExprs
-    Cast subExpr typeName ->
-        parseScalarExpressionToCol subExpr
+    Cast subExpr typeName -> do
+        parsedSubExpr <- parseScalarExpressionToCol subExpr
+        parsedType <- sparkType typeName
+        pure $ parsedSubExpr
             <> ".cast("
-            <> sparkType typeName
+            <> parsedType
             <> ")"
     Case  test     whens     elsePart -> parseCaseExpression test whens elsePart
     BinOp subExpr1 funcNames subExpr2 -> parseBinOp subExpr1 funcNames subExpr2
@@ -329,37 +347,37 @@ _parseScalarExpression expr = case expr of
     SpecialOp functionNames subExprs -> handleSpecialOp functionNames subExprs
     PrefixOp functionNames subExpr ->
         parseFunctionNames functionNames <> parseScalarExpressionToCol subExpr
-    Parens subExpr       -> "(" <> parseScalarExpressionToCol subExpr <> ")"
-    HostParameter name _ -> T.pack name
+    Parens subExpr       -> (\x -> "(" <> x <> ")") <$> parseScalarExpressionToCol subExpr
+    HostParameter name _ -> Right $ T.pack name
     In inOrNotIn subExpr predValue ->
         parseInExpression inOrNotIn subExpr predValue
     WindowApp names args partition orderBy frame ->
         parseWindowFunction names args partition orderBy frame
-    unparsed -> T.pack $ ppShow unparsed
+    unparsed -> parseError "Can't parse expression in query block" unparsed
 
-parseSortSpecs :: [SortSpec] -> Text
-parseSortSpecs sortSpecs = T.intercalate "," $ map parseSortSpec sortSpecs
+parseSortSpecs :: [SortSpec] -> Either UnhandledError Text
+parseSortSpecs sortSpecs = T.intercalate "," <$> traverse parseSortSpec sortSpecs
 
-parseSortSpec :: SortSpec -> Text
+parseSortSpec :: SortSpec -> Either UnhandledError Text
 parseSortSpec (SortSpec expr direction nullsOrder) =
     case (direction, nullsOrder) of
         (DirDefault, NullsOrderDefault) -> parseScalarExpressionToCol expr
         (Asc, NullsOrderDefault) ->
-            "asc(" <> parseScalarExpressionNoCol expr <> ")"
+            (\x -> "asc(" <> x <> ")") <$> parseScalarExpressionNoCol expr
         (Desc, NullsOrderDefault) ->
-            "desc(" <> parseScalarExpressionNoCol expr <> ")"
+            (\x -> "desc(" <> x <> ")") <$> parseScalarExpressionNoCol expr
         (DirDefault, NullsFirst) ->
-            parseScalarExpressionToCol expr <> ".asc_nulls_first()"
+            (<> ".asc_nulls_first()") <$> parseScalarExpressionToCol expr
         (Asc, NullsFirst) ->
-            parseScalarExpressionToCol expr <> ".asc_nulls_first()"
+            (<> ".asc_nulls_first()") <$> parseScalarExpressionToCol expr
         (Desc, NullsFirst) ->
-            parseScalarExpressionToCol expr <> ".desc_nulls_first()"
+            (<> ".desc_nulls_first()") <$> parseScalarExpressionToCol expr
         (DirDefault, NullsLast) ->
-            parseScalarExpressionToCol expr <> ".asc_nulls_last()"
+            (<> ".asc_nulls_last()") <$> parseScalarExpressionToCol expr
         (Asc, NullsLast) ->
-            parseScalarExpressionToCol expr <> ".asc_nulls_last()"
+            (<> ".asc_nulls_last()") <$> parseScalarExpressionToCol expr
         (Desc, NullsLast) ->
-            parseScalarExpressionToCol expr <> ".desc_nulls_last()"
+            (<> ".desc_nulls_last()") <$> parseScalarExpressionToCol expr
 
 parseWindowFunction
     :: [Name]
@@ -367,181 +385,188 @@ parseWindowFunction
     -> [ScalarExpr]
     -> [SortSpec]
     -> Maybe Frame
-    -> Text
-parseWindowFunction names _ partition orderBy _ =
-    parseNamesInsideIden names
+    -> Either UnhandledError Text
+parseWindowFunction names _ partition orderBy _ = do
+    parsedName <- parseNamesInsideIden names
+    parsedPartition <- parseScalarExpressionsGeneral partition
+    parsedOrderBy <- parseSortSpecs orderBy
+    pure $ parsedName
         <> "().over(Window.partitionBy("
-        <> parseScalarExpressionsGeneral partition
+        <> parsedPartition
         <> ").orderBy("
-        <> parseSortSpecs orderBy
+        <> parsedOrderBy
         <> ")"
 
-parseInExpression :: Bool -> ScalarExpr -> InPredValue -> Text
-parseInExpression inOrNotIn expr predValue =
-    prefix
-        <> parseScalarExpressionToCol expr
-        <> ".isin("
-        <> parseInPredicate predValue
-        <> ")"
+parseInExpression :: Bool -> ScalarExpr -> InPredValue -> Either UnhandledError Text
+parseInExpression inOrNotIn expr predValue = do
+        parsedExpression <- parseScalarExpressionToCol expr
+        parsedPredicate <- parseInPredicate predValue
+        pure $ prefix <> parsedExpression <> ".isin(" <> parsedPredicate <> ")"
     where prefix = if inOrNotIn then "" else "!"
 
-parseInPredicate :: InPredValue -> Text
+parseInPredicate :: InPredValue -> Either UnhandledError Text
 parseInPredicate predValue = case predValue of
     InList      expr -> parseScalarExpressionsGeneral expr
     InQueryExpr expr -> printQueryExpression expr
 
-parseBinOp :: ScalarExpr -> [Name] -> ScalarExpr -> Text
+parseBinOp :: ScalarExpr -> [Name] -> ScalarExpr -> Either UnhandledError Text
 parseBinOp subExpr1 funcNames subExpr2 =
-    let functionName = parseFunctionNames funcNames
-    in  case functionName of
-            "not like" -> "!" <> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
-            "like"     -> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
+    do
+        functionName <- parseFunctionNames funcNames
+        parsedExpr1 <- parseScalarExpressionToCol subExpr1
+        parsedExpr2 <- parseScalarExpressionToAny subExpr2
+        case functionName of
+            "not like" -> pure $ "!" <> parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
+            "like"     -> pure $ parsedExpr1 <> ".like(" <> parsedExpr2 <> ")"
             -- This is where the AST gets fucked up, thinks a schema dot separator is a function
             "."        -> handleSpecialCaseForDotSeperator subExpr1 subExpr2
-            _ -> parsedExpr1 <> " " <> functionName <> " " <> parsedExpr2
-  where
-    parsedExpr1 = parseScalarExpressionToCol subExpr1
-    parsedExpr2 = parseScalarExpressionToAny subExpr2
+            _ -> pure $ parsedExpr1 <> " " <> functionName <> " " <> parsedExpr2
 
-
-handleSpecialCaseForDotSeperator :: ScalarExpr -> ScalarExpr -> Text
+handleSpecialCaseForDotSeperator :: ScalarExpr -> ScalarExpr -> Either UnhandledError Text
 handleSpecialCaseForDotSeperator expr1 expr2 =
-    "col(\"" <> parsedTableAndColumn <> "\")"
+    fmap (\x -> "col(\"" <> x <> "\")") parsedTableAndColumn
   where
     parsedTableAndColumn = case (expr1, expr2) of
-        (Iden name1, Iden name2) ->
-            parseNamesInsideIden name1 <> "." <> parseNamesInsideIden name2
-        (Iden name1, Star) -> parseNamesInsideIden name1 <> ".*"
-        _                  -> "error"
-
-parseIdenToCol :: [Name] -> Text
-parseIdenToCol names =
-    let parsedName = parseNamesInsideIden names
-    in  case parsedName of
-            "TRUE"  -> "lit(true)"
-            "FALSE" -> "lit(false)"
-            "NULL" -> "lit(null)"
-            other   -> "col(\"" <> other <> "\")"
-
-parseIdenToAny :: [Name] -> Text
-parseIdenToAny names =
-    let parsedName = parseNamesInsideIden names
-    in  case parsedName of
-            "TRUE"  -> "true"
-            "FALSE" -> "false"
-            "NULL" -> "null"
-            other   -> "col(\"" <> other <> "\")"
-
-parseIdenNoCol :: [Name] -> Text
-parseIdenNoCol names = 
-    let parsedName = parseNamesInUsingClause names
-    in  case parsedName of
-        "TRUE"  -> "true"
-        "FALSE" -> "false"
-        "NULL" -> "null"
-        other   -> other
+        (Iden name1, Iden name2) -> do
+            parsedName1 <- parseNamesInsideIden name1
+            parsedName2 <- parseNamesInsideIden name2
+            pure $ parsedName1 <> "." <> parsedName2
+        (Iden name1, Star) -> (<> ".*") <$> parseNamesInsideIden name1
+        other                  -> parseError "parseDotSeparatorCase error" other
 
 
-parseAppExpression :: [Name] -> [ScalarExpr] -> Text
-parseAppExpression functionNames subExpr =
-    let functionName = parseFunctionNames functionNames
-    in
-        case functionName of
-            "coalesce" ->
-                "coalesce(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
-            "greatest" ->
-                "greatest(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
-            "least" ->
-                "least(" <> parseScalarExpressionsSecArgCol subExpr <> ")"
-            "date_part" -> parseDatePart subExpr
-            _ ->
-                functionName
-                    <> "("
-                    <> parseScalarExpressionsGeneral subExpr
-                    <> ")"
+parseError :: Show a => Text -> a -> Either UnhandledError Text
+parseError errorMessage expr = Left $ UnhandledError errorMessage (T.pack (ppShow expr))
 
-parseDatePart :: [ScalarExpr] -> Text
-parseDatePart [expr1, expr2] = 
-    case firstExpr of 
-        "\"month\"" -> "month(" <> secondExpr <> ")"
-        "\"day\"" -> "day(" <> secondExpr <> ")"
-        "\"year\"" -> "year(" <> secondExpr <> ")"
-        _ -> "parseError " <> firstExpr
-    where 
-        firstExpr = parseScalarExpressionNoCol expr1
-        secondExpr = parseScalarExpressionToCol expr2
-parseDatePart _ = "parseError"
+parseIdenToCol :: [Name] -> Either UnhandledError Text
+parseIdenToCol names = do
+    parsedName <- parseNamesInsideIden names
+    case parsedName of
+        "TRUE"  -> pure "lit(true)"
+        "FALSE" -> pure "lit(false)"
+        "NULL" -> pure "lit(null)"
+        other   -> pure $ "col(\"" <> other <> "\")"
+
+parseIdenToAny :: [Name] -> Either UnhandledError Text
+parseIdenToAny names = do
+    parsedName <- parseNamesInsideIden names
+    case parsedName of
+        "TRUE"  -> pure "true"
+        "FALSE" -> pure "false"
+        "NULL" -> pure "null"
+        other   -> pure $ "col(\"" <> other <> "\")"
+
+parseIdenNoCol :: [Name] -> Either UnhandledError Text
+parseIdenNoCol names = do
+    parsedName <- parseNamesInUsingClause names
+    case parsedName of
+        "TRUE"  -> pure "true"
+        "FALSE" -> pure "false"
+        "NULL" -> pure "null"
+        other   -> pure other
+
+
+parseAppExpression :: [Name] -> [ScalarExpr] -> Either UnhandledError Text
+parseAppExpression functionNames subExpr = do
+    functionName <- parseFunctionNames functionNames
+    case functionName of
+        "coalesce" ->
+            (\x -> "coalesce(" <> x <> ")") <$> parseScalarExpressionsSecArgCol subExpr
+        "greatest" ->
+            (\x -> "greatest(" <> x <> ")") <$> parseScalarExpressionsSecArgCol subExpr
+        "least" ->
+            (\x -> "least(" <> x <> ")") <$> parseScalarExpressionsSecArgCol subExpr
+        "date_part" -> parseDatePart subExpr
+        _ -> (\x -> functionName <> "(" <> x <> ")") <$> parseScalarExpressionsGeneral subExpr
+
+parseDatePart :: [ScalarExpr] -> Either UnhandledError Text
+parseDatePart [expr1, expr2] =
+    do
+        firstExpr <- parseScalarExpressionNoCol expr1
+        secondExpr <- parseScalarExpressionToCol expr2
+        case firstExpr of
+            "\"month\"" -> return $ "month(" <> secondExpr <> ")"
+            "\"day\"" -> return $ "day(" <> secondExpr <> ")"
+            "\"year\"" -> return $ "year(" <> secondExpr <> ")"
+            _ -> parseError "Unrecongised date part " firstExpr
+parseDatePart other = parseError "parseError" other
 
 -- Currently used to handle between
-handleSpecialOp :: [Name] -> [ScalarExpr] -> Text
+handleSpecialOp :: [Name] -> [ScalarExpr] -> Either UnhandledError Text
 handleSpecialOp functionNames exprs = case functionNames of
     [Name Nothing "between"] -> handleBetween exprs
-    unparsed                 -> T.pack $ ppShow unparsed
+    unparsed                 -> parseError "Couldn't handle special op" unparsed
 
 
-handleBetween :: [ScalarExpr] -> Text
+handleBetween :: [ScalarExpr] -> Either UnhandledError Text
 handleBetween exprs = case exprs of
-    [expr1, expr2, expr3] ->
-        parseScalarExpressionToCol expr1
+    [expr1, expr2, expr3] -> do
+        parsedExpr1 <- parseScalarExpressionToCol expr1
+        parsedExpr2 <- parseScalarExpressionToAny expr2
+        parsedExpr3 <- parseScalarExpressionToAny expr3
+        return $ parsedExpr1
             <> ".between("
-            <> parseScalarExpressionToAny expr2
+            <> parsedExpr2
             <> ", "
-            <> parseScalarExpressionToAny expr3
+            <> parsedExpr3
             <> ")"
-    _ -> "unhandled"
+    other -> parseError ".between parse error" other
 
 
-parseFunctionNames :: [Name] -> Text
+parseFunctionNames :: [Name] -> Either UnhandledError Text
 parseFunctionNames names = case names of
     [name]             -> parseFunctionName name
-    [schemaName, name] -> parseName schemaName <> "." <> parseFunctionName name
-    other              -> T.pack $ ppShow other
+    [schemaName, name] -> do
+        parsedSchemaName <- parseName schemaName
+        parsedFunctionName <- parseFunctionName name
+        return $ parsedSchemaName <> "." <> parsedFunctionName
+    other              -> parseError "Couldn't parse function name" other
 
-parseFunctionName :: Name -> Text
+parseFunctionName :: Name -> Either UnhandledError Text
 parseFunctionName name = case name of
-    Name Nothing subName -> sparkFunction $ T.pack subName
-    other                -> T.pack $ ppShow other
+    Name Nothing subName -> Right $ sparkFunction $ T.pack subName
+    other                -> parseError "Couldn't parse function name" other
 
-parseNamesInUsingClause :: [Name] -> Text
-parseNamesInUsingClause names =
-    T.intercalate "," $ map (\x -> "\"" <> parseName x <> "\"") names
+parseNamesInUsingClause :: [Name] -> Either UnhandledError Text
+parseNamesInUsingClause names = do
+    parsedNames <- traverse parseName names
+    let mappedNames = map (\x -> "(" <> x <> "\"") parsedNames
+    pure $ T.intercalate "," mappedNames
 
-parseNamesInsideIden :: [Name] -> Text
+parseNamesInsideIden :: [Name] -> Either UnhandledError Text
 parseNamesInsideIden names = case names of
     [name]             -> parseName name
-    [schemaName, name] -> parseName schemaName <> "." <> parseName name
-    other              -> T.pack $ ppShow other
+    [schemaName, name] -> parseName schemaName <> Right "." <> parseName name
+    other              -> parseError "Couldn't parse name" other
 
-parseName :: Name -> Text
+parseName :: Name -> Either UnhandledError Text
 parseName name = case name of
-    Name Nothing subName -> T.pack subName
-    other                -> T.pack (ppShow other)
+    Name Nothing subName -> Right $ T.pack subName
+    other                -> parseError "Couldn't parse name" other
 
 parseCaseExpression
     :: Maybe ScalarExpr
     -> [([ScalarExpr], ScalarExpr)]
     -> Maybe ScalarExpr
-    -> Text
-parseCaseExpression _ whens elsePart =
-    T.intercalate "." (map parseWhen whens) <> parseElse
+    -> Either UnhandledError Text
+parseCaseExpression _ whens elsePart = do
+    parsedWhens <- traverse parseWhen whens
+    parsedElse <- case elsePart of
+        Nothing -> Right ""
+        Just expr -> (\x -> ".otherwise(" <> x <> ")") <$> parseScalarExpressionToAny expr
+    return $ T.intercalate "." parsedWhens <> parsedElse
   where
-    parseWhen (condExprs, thenExpr) =
-        "when("
-            <> parseScalarExpressionsGeneral condExprs
-            <> ", "
-            <> parseScalarExpressionToAny thenExpr
-            <> ")"
-    parseElse = case elsePart of
-        Nothing   -> ""
-        Just expr -> ".otherwise(" <> parseScalarExpressionToAny expr <> ")"
-
+    parseWhen (condExprs, thenExpr) = do
+        parsedCondExpr <- parseScalarExpressionsGeneral condExprs
+        parsedThenExpr <- parseScalarExpressionToAny thenExpr
+        return $ "when(" <> parsedCondExpr <> ", " <> parsedThenExpr <> ")"
 
 sparkFunction :: Text -> Text
 sparkFunction function = case T.toLower function of
     "nvl"          -> "coalesce"
     "strpos"       -> "instr"
-    "is null"      -> ".isNull()"
-    "is not null"  -> ".isNotNull()"
+    "is null"      -> ".isNull"
+    "is not null"  -> ".isNotNull"
     "="            -> "==="
     "<>"           -> "=!="
     "is true"      -> " === true"
@@ -551,9 +576,9 @@ sparkFunction function = case T.toLower function of
     "not"          -> "!"
     other          -> T.toLower other
 
-sparkType :: TypeName -> Text
+sparkType :: TypeName -> Either UnhandledError Text
 sparkType typeName = case typeName of
-    TypeName [Name Nothing "int8"] -> "DataTypes.LongType"
-    TypeName [name               ] -> T.pack $ ppShow name
-    PrecTypeName [Name Nothing "varchar"] _ -> "DataTypes.StringType"
-    blah                           -> T.pack $ ppShow blah
+    TypeName [Name Nothing "int8"] -> Right "DataTypes.LongType"
+    TypeName [name               ] -> parseError "Couldn't parse type" name
+    PrecTypeName [Name Nothing "varchar"] _ -> Right "DataTypes.StringType"
+    blah                           -> parseError "Couldn't parse type" blah
