@@ -367,26 +367,22 @@ parseSortSpecs :: [SortSpec] -> Either UnhandledError Text
 parseSortSpecs sortSpecs =
     T.intercalate "," <$> traverse parseSortSpec sortSpecs
 
+-- Note that Spark uses opposite nulls order to Redshift/Psql to here we 
+-- explicitly specify nulls first or nulls last when converting from psql
+-- default
 parseSortSpec :: SortSpec -> Either UnhandledError Text
 parseSortSpec (SortSpec expr direction nullsOrder) =
-    case (direction, nullsOrder) of
-        (DirDefault, NullsOrderDefault) -> parseScalarExpressionToCol expr
-        (Asc, NullsOrderDefault) ->
-            (\x -> "asc(" <> x <> ")") <$> parseScalarExpressionNoCol expr
-        (Desc, NullsOrderDefault) ->
-            (\x -> "desc(" <> x <> ")") <$> parseScalarExpressionNoCol expr
-        (DirDefault, NullsFirst) ->
-            (<> ".asc_nulls_first()") <$> parseScalarExpressionToCol expr
-        (Asc, NullsFirst) ->
-            (<> ".asc_nulls_first()") <$> parseScalarExpressionToCol expr
-        (Desc, NullsFirst) ->
-            (<> ".desc_nulls_first()") <$> parseScalarExpressionToCol expr
-        (DirDefault, NullsLast) ->
-            (<> ".asc_nulls_last()") <$> parseScalarExpressionToCol expr
-        (Asc, NullsLast) ->
-            (<> ".asc_nulls_last()") <$> parseScalarExpressionToCol expr
-        (Desc, NullsLast) ->
-            (<> ".desc_nulls_last()") <$> parseScalarExpressionToCol expr
+    (<> directionQualifier) <$> parseScalarExpressionToCol expr
+    where directionQualifier = case (direction, nullsOrder) of
+            (DirDefault, NullsOrderDefault) -> ".asc_nulls_last()"
+            (Asc, NullsOrderDefault) -> ".asc_nulls_last()"
+            (Desc, NullsOrderDefault) -> ".desc_nulls_first()"
+            (DirDefault, NullsFirst) -> ".asc_nulls_first()"
+            (Asc, NullsFirst) -> ".asc_nulls_first()"
+            (Desc, NullsFirst) -> ".desc_nulls_first()"
+            (DirDefault, NullsLast) -> ".asc_nulls_last()"
+            (Asc, NullsLast) -> ".asc_nulls_last()"
+            (Desc, NullsLast) -> ".desc_nulls_last()"
 
 parseWindowFunction
     :: [Name]
