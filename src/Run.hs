@@ -1,7 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE DeriveGeneric #-}
 
 module Run
     ( run
@@ -11,7 +9,6 @@ where
 
 import           Data.Either()
 import           System.Environment             (getArgs)
-import           Text.RawString.QQ
 
 import           Text.Show.Pretty               ( ppShow )
 
@@ -78,7 +75,7 @@ parseFile filename = do
     case parsedSql of
       Right parsed -> putStrLn $ T.unpack parsed
       Left err -> print err
-    
+
 
 parseSql :: String -> Either UnhandledError Text
 parseSql src = do
