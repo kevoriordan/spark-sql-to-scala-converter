@@ -9,7 +9,8 @@ module Run
     )
 where
 
-import           Data.Either
+import           Data.Either()
+import           System.Environment             (getArgs)
 import           Text.RawString.QQ
 
 import           Text.Show.Pretty               ( ppShow )
@@ -63,14 +64,21 @@ data UnhandledError = UnhandledError
                         } deriving (Show)
 
 run :: IO ()
-run =
-    let parsedSql = parseSql [r|
-    select a, b from blah
-|]
-       in  case parsedSql of
-            Right parsed -> putStrLn $ T.unpack parsed
-            Left  err    -> print err
+run = do
+  args <- getArgs
+  case args of
+    [] -> putStrLn "Error: Must specify filename of SQL to convert"
+    [filename] -> parseFile filename
+    _ -> putStrLn "Too many arguments. Only filename is supported"
 
+parseFile :: String -> IO ()
+parseFile filename = do
+  sqlString <- readFile filename
+  let parsedSql = parseSql sqlString in
+    case parsedSql of
+      Right parsed -> putStrLn $ T.unpack parsed
+      Left err -> print err
+    
 
 parseSql :: String -> Either UnhandledError Text
 parseSql src = do
