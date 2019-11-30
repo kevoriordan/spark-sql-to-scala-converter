@@ -620,4 +620,8 @@ sparkType typeName = case typeName of
     TypeName [Name Nothing "integer"] -> Right "DataTypes.IntegerType"
     TypeName [name               ] -> parseError "Couldn't parse type" name
     PrecTypeName [Name Nothing "varchar"] _ -> Right "DataTypes.StringType"
+    PrecScaleTypeName [Name Nothing "decimal"] precision scale -> Right $ "DataTypes.createDecimalType(" <> toText precision <> "," <> toText scale <> ")"
     blah                           -> parseError "Couldn't parse type" blah
+
+toText :: Show a => a -> Text
+toText input = T.pack $ show input
